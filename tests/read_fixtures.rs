@@ -833,3 +833,97 @@ fn read_attribute() {
         val_str
     );
 }
+
+// ── Creation order (B-tree v2 record types 6 & 9) ──────────────────────────
+
+#[test]
+fn read_creation_order_links() {
+    let file = hdf5_reader::File::open("tests/fixtures/creation_order.h5").unwrap();
+    let root = file.root_group().unwrap();
+    let grp = root.group("ordered").unwrap();
+
+    // Name index returns in hash order (not necessarily alphabetical)
+    let by_name = grp.members().unwrap();
+    assert_eq!(by_name.len(), 3);
+
+    // Creation order should be: charlie (0), alpha (1), bravo (2)
+    let by_order = grp.members_by_creation_order().unwrap();
+    assert_eq!(by_order, vec!["charlie", "alpha", "bravo"]);
+
+    // Verify creation order differs from name-hash order
+    assert_ne!(by_name, by_order, "name order and creation order should differ");
+}
+
+#[test]
+fn read_creation_order_attributes() {
+    let file = hdf5_reader::File::open("tests/fixtures/creation_order.h5").unwrap();
+    let root = file.root_group().unwrap();
+    let grp = root.group("ordered").unwrap();
+
+    // Name index returns in hash order
+    let by_name = grp.attributes().unwrap();
+    assert_eq!(by_name.len(), 3);
+
+    // Creation order should be: zebra (0), mango (1), apple (2)
+    let by_order = grp.attributes_by_creation_order().unwrap();
+    let names_by_order: Vec<&str> = by_order.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names_by_order, vec!["zebra", "mango", "apple"]);
+
+    // Verify the values are correct regardless of iteration order
+    let zebra = by_order.iter().find(|a| a.name == "zebra").unwrap();
+    let val = i32::from_le_bytes([
+        zebra.raw_value[0], zebra.raw_value[1],
+        zebra.raw_value[2], zebra.raw_value[3],
+    ]);
+    assert_eq!(val, 30);
+
+    let mango = by_order.iter().find(|a| a.name == "mango").unwrap();
+    let val = i32::from_le_bytes([
+        mango.raw_value[0], mango.raw_value[1],
+        mango.raw_value[2], mango.raw_value[3],
+    ]);
+    assert_eq!(val, 10);
+}
+
+// ── Complex type (HDF5 2.0, class 11) ──────────────────────────────────────
+
+#[test]
+fn read_complex_dataset() {
+    let file = hdf5_reader::File::open("tests/fixtures/complex.h5").unwrap();
+    let root = file.root_group().unwrap();
+    let ds = root.dataset("complex_data").unwrap();
+
+    // Check datatype: should be Complex with f64 base
+    let dt = ds.datatype().unwrap();
+    match &dt {
+        hdf5_reader::Datatype::Complex { size, base } => {
+            assert_eq!(*size, 16); // 2 * 8 bytes
+            assert_eq!(base.element_size(), 8);
+        }
+        other => panic!("expected Complex datatype, got {:?}", other),
+    }
+
+    // Check shape
+    let shape = ds.shape().unwrap();
+    assert_eq!(shape, vec![4]);
+
+    // Read raw data: 4 complex doubles = 8 doubles = 64 bytes
+    let raw = ds.read_raw().unwrap();
+    assert_eq!(raw.len(), 64);
+
+    // Parse as pairs of f64 (real, imag)
+    let values: Vec<(f64, f64)> = raw
+        .chunks_exact(16)
+        .map(|c| {
+            let re = f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
+            let im = f64::from_le_bytes([c[8], c[9], c[10], c[11], c[12], c[13], c[14], c[15]]);
+            (re, im)
+        })
+        .collect();
+
+    assert_eq!(values.len(), 4);
+    assert_eq!(values[0], (1.0, 2.0));   // 1+2i
+    assert_eq!(values[1], (3.0, 4.0));   // 3+4i
+    assert_eq!(values[2], (-1.0, 0.0));  // -1+0i
+    assert_eq!(values[3], (0.0, -5.0));  // 0-5i
+}

@@ -295,6 +295,14 @@ impl<'a, R: ReadAt + ?Sized> Group<'a, R> {
         Ok(links.into_iter().map(|l| l.name).collect())
     }
 
+    /// List all child link names in creation order.
+    ///
+    /// Falls back to name order if creation order tracking is not available.
+    pub fn members_by_creation_order(&self) -> Result<Vec<String>> {
+        let links = self.read_links_by_creation_order()?;
+        Ok(links.into_iter().map(|l| l.name).collect())
+    }
+
     /// Get a specific child by name, returning the link.
     pub fn find_link(&self, name: &str) -> Result<Link> {
         let links = self.read_links()?;
@@ -357,6 +365,13 @@ impl<'a, R: ReadAt + ?Sized> Group<'a, R> {
         parse_attributes(&self.header, self.file)
     }
 
+    /// Read all attributes on this group in creation order.
+    ///
+    /// Falls back to name order if creation order tracking is not available.
+    pub fn attributes_by_creation_order(&self) -> Result<Vec<Attribute>> {
+        parse_attributes_by_creation_order(&self.header, self.file)
+    }
+
     /// Read all links from this group's object header.
     ///
     /// Links can be stored in two ways:
@@ -386,10 +401,33 @@ impl<'a, R: ReadAt + ?Sized> Group<'a, R> {
         Ok(links) // empty — no links
     }
 
-    /// Parse a Link Info message and read links from fractal heap.
-    fn read_links_from_link_info(&self, data: &[u8]) -> Result<Vec<Link>> {
+    /// Read all links, preferring creation order when available.
+    fn read_links_by_creation_order(&self) -> Result<Vec<Link>> {
         let so = self.file.size_of_offsets();
-        let sl = self.file.size_of_lengths();
+
+        // Direct Link messages don't carry creation order — return as-is
+        let mut links: Vec<Link> = Vec::new();
+        for msg in &self.header.messages {
+            if msg.msg_type == MessageType::Link {
+                links.push(Link::parse(&msg.data, so)?);
+            }
+        }
+        if !links.is_empty() {
+            return Ok(links);
+        }
+
+        for msg in &self.header.messages {
+            if msg.msg_type == MessageType::LinkInfo {
+                return self.read_links_from_link_info_by_creation_order(&msg.data);
+            }
+        }
+
+        Ok(links)
+    }
+
+    /// Parse a Link Info message and extract addresses.
+    fn parse_link_info(&self, data: &[u8]) -> Result<(u64, u64, u64)> {
+        let so = self.file.size_of_offsets();
         let o = so as usize;
 
         if data.len() < 2 {
@@ -422,28 +460,67 @@ impl<'a, R: ReadAt + ?Sized> Group<'a, R> {
                 msg: "link info: truncated at B-tree address".into(),
             });
         }
-        let bt2_addr = read_offset_from_slice(data, pos, so);
+        let bt2_name_addr = read_offset_from_slice(data, pos, so);
+        pos += o;
+
+        // Optional: B-tree v2 address (creation order index, if flags bit 1 set)
+        let bt2_corder_addr = if (flags & 0x02) != 0 && pos + o <= data.len() {
+            read_offset_from_slice(data, pos, so)
+        } else {
+            u64::MAX
+        };
+
+        Ok((fheap_addr, bt2_name_addr, bt2_corder_addr))
+    }
+
+    /// Parse a Link Info message and read links from fractal heap (name order).
+    fn read_links_from_link_info(&self, data: &[u8]) -> Result<Vec<Link>> {
+        let (fheap_addr, bt2_addr, _) = self.parse_link_info(data)?;
+        self.read_links_from_btree(fheap_addr, bt2_addr, false)
+    }
+
+    /// Parse a Link Info message and read links in creation order.
+    fn read_links_from_link_info_by_creation_order(&self, data: &[u8]) -> Result<Vec<Link>> {
+        let (fheap_addr, bt2_name_addr, bt2_corder_addr) = self.parse_link_info(data)?;
+        if bt2_corder_addr != u64::MAX {
+            self.read_links_from_btree(fheap_addr, bt2_corder_addr, true)
+        } else {
+            // Fall back to name order if creation order index not available
+            self.read_links_from_btree(fheap_addr, bt2_name_addr, false)
+        }
+    }
+
+    /// Read links from a fractal heap using the given B-tree v2 index.
+    fn read_links_from_btree(
+        &self,
+        fheap_addr: u64,
+        bt2_addr: u64,
+        by_creation_order: bool,
+    ) -> Result<Vec<Link>> {
+        let so = self.file.size_of_offsets();
+        let sl = self.file.size_of_lengths();
 
         if fheap_addr == u64::MAX || bt2_addr == u64::MAX {
-            return Ok(Vec::new()); // no links stored yet
+            return Ok(Vec::new());
         }
 
-        // Parse the fractal heap header
         let fheap = FractalHeapHeader::parse(&*self.file.reader, fheap_addr, so, sl)?;
-
-        // Parse the B-tree v2 header
         let bt2 = BTree2Header::parse(&*self.file.reader, bt2_addr, so, sl)?;
 
-        // Iterate B-tree records → each contains a heap ID → look up in fractal heap
         let mut links = Vec::new();
         let heap_id_len = fheap.heap_id_length as usize;
 
         btree2::iterate_records(&*self.file.reader, &bt2, so, |record| {
-            // Type 5 record: hash (4 bytes) + heap_id (heap_id_len bytes)
-            if let Some((_hash, heap_id)) =
+            let heap_id = if by_creation_order {
+                // Type 6 record: creation_order (8) + heap_id
+                btree2::parse_link_creation_order_record(&record.data, heap_id_len)
+                    .map(|(_order, id)| id)
+            } else {
+                // Type 5 record: hash (4) + heap_id
                 btree2::parse_link_name_record(&record.data, heap_id_len)
-            {
-                // Read the link message from the fractal heap
+                    .map(|(_hash, id)| id)
+            };
+            if let Some(heap_id) = heap_id {
                 let link_data = fractal_heap::read_managed_object(
                     &*self.file.reader,
                     &fheap,
@@ -576,6 +653,13 @@ impl<'a, R: ReadAt + ?Sized> Dataset<'a, R> {
     /// Read all attributes on this dataset.
     pub fn attributes(&self) -> Result<Vec<Attribute>> {
         parse_attributes(&self.header, self.file)
+    }
+
+    /// Read all attributes on this dataset in creation order.
+    ///
+    /// Falls back to name order if creation order tracking is not available.
+    pub fn attributes_by_creation_order(&self) -> Result<Vec<Attribute>> {
+        parse_attributes_by_creation_order(&self.header, self.file)
     }
 
     /// Read the entire dataset as raw bytes.
@@ -934,23 +1018,43 @@ fn parse_attributes<R: ReadAt + ?Sized>(
     Ok(attrs)
 }
 
-/// Parse an Attribute Info message and read attributes from fractal heap + B-tree v2.
-///
-/// Attribute Info message layout:
-/// ```text
-/// Byte 0:    Version (0)
-/// Byte 1:    Flags (bit 0: max creation order present, bit 1: creation order index present)
-/// [if bit 0]: Max creation order (2 bytes)
-/// Fractal heap address (size_of_offsets)
-/// Attribute Name B-tree v2 address (size_of_offsets)
-/// [if bit 1]: Creation Order B-tree v2 address (size_of_offsets)
-/// ```
-fn parse_dense_attributes<R: ReadAt + ?Sized>(
-    data: &[u8],
+/// Parse attribute messages, preferring creation order when available.
+fn parse_attributes_by_creation_order<R: ReadAt + ?Sized>(
+    header: &ObjectHeader,
     file: &File<R>,
 ) -> Result<Vec<Attribute>> {
+    let mut attrs = Vec::new();
+
+    // Direct Attribute messages don't carry creation order — return as-is
+    for msg in &header.messages {
+        if msg.msg_type == MessageType::Attribute {
+            if let Ok(attr) = parse_attribute_message(&msg.data, file) {
+                attrs.push(attr);
+            }
+        }
+    }
+
+    if !attrs.is_empty() {
+        return Ok(attrs);
+    }
+
+    for msg in &header.messages {
+        if msg.msg_type == MessageType::AttributeInfo {
+            return parse_dense_attributes_by_creation_order(&msg.data, file);
+        }
+    }
+
+    Ok(attrs)
+}
+
+/// Parse an Attribute Info message and extract addresses.
+///
+/// Returns (fheap_addr, bt2_name_addr, bt2_corder_addr).
+fn parse_attr_info_addrs<R: ReadAt + ?Sized>(
+    data: &[u8],
+    file: &File<R>,
+) -> Result<(u64, u64, u64)> {
     let so = file.size_of_offsets();
-    let sl = file.size_of_lengths();
     let o = so as usize;
 
     if data.len() < 2 {
@@ -982,22 +1086,48 @@ fn parse_dense_attributes<R: ReadAt + ?Sized>(
         });
     }
     let bt2_name_addr = read_offset_from_slice(data, pos, so);
+    pos += o;
 
-    if fheap_addr == u64::MAX || bt2_name_addr == u64::MAX {
+    // Optional: B-tree v2 address (creation order index, if flags bit 1 set)
+    let bt2_corder_addr = if (flags & 0x02) != 0 && pos + o <= data.len() {
+        read_offset_from_slice(data, pos, so)
+    } else {
+        u64::MAX
+    };
+
+    Ok((fheap_addr, bt2_name_addr, bt2_corder_addr))
+}
+
+/// Read attributes from fractal heap using the given B-tree v2 index.
+fn read_dense_attrs_from_btree<R: ReadAt + ?Sized>(
+    file: &File<R>,
+    fheap_addr: u64,
+    bt2_addr: u64,
+    by_creation_order: bool,
+) -> Result<Vec<Attribute>> {
+    let so = file.size_of_offsets();
+    let sl = file.size_of_lengths();
+
+    if fheap_addr == u64::MAX || bt2_addr == u64::MAX {
         return Ok(Vec::new());
     }
 
-    // Parse the fractal heap
     let fheap = FractalHeapHeader::parse(&*file.reader, fheap_addr, so, sl)?;
-
-    // Parse the B-tree v2 (type 8: attribute name index)
-    let bt2 = BTree2Header::parse(&*file.reader, bt2_name_addr, so, sl)?;
+    let bt2 = BTree2Header::parse(&*file.reader, bt2_addr, so, sl)?;
 
     let mut attrs = Vec::new();
     let heap_id_len = fheap.heap_id_length as usize;
 
     btree2::iterate_records(&*file.reader, &bt2, so, |record| {
-        if let Some(heap_id) = btree2::parse_attribute_name_record(&record.data, heap_id_len) {
+        let heap_id = if by_creation_order {
+            // Type 9 record: heap_id + flags(1) + creation_order(4)
+            btree2::parse_attribute_creation_order_record(&record.data, heap_id_len)
+                .map(|(_order, id)| id)
+        } else {
+            // Type 8 record: heap_id + flags(1) + creation_order(4) + hash(4)
+            btree2::parse_attribute_name_record(&record.data, heap_id_len)
+        };
+        if let Some(heap_id) = heap_id {
             let attr_data = fractal_heap::read_managed_object(
                 &*file.reader,
                 &fheap,
@@ -1013,6 +1143,29 @@ fn parse_dense_attributes<R: ReadAt + ?Sized>(
     })?;
 
     Ok(attrs)
+}
+
+/// Parse dense attributes from an Attribute Info message (name order).
+fn parse_dense_attributes<R: ReadAt + ?Sized>(
+    data: &[u8],
+    file: &File<R>,
+) -> Result<Vec<Attribute>> {
+    let (fheap_addr, bt2_name_addr, _) = parse_attr_info_addrs(data, file)?;
+    read_dense_attrs_from_btree(file, fheap_addr, bt2_name_addr, false)
+}
+
+/// Parse dense attributes from an Attribute Info message (creation order).
+fn parse_dense_attributes_by_creation_order<R: ReadAt + ?Sized>(
+    data: &[u8],
+    file: &File<R>,
+) -> Result<Vec<Attribute>> {
+    let (fheap_addr, bt2_name_addr, bt2_corder_addr) = parse_attr_info_addrs(data, file)?;
+    if bt2_corder_addr != u64::MAX {
+        read_dense_attrs_from_btree(file, fheap_addr, bt2_corder_addr, true)
+    } else {
+        // Fall back to name order
+        read_dense_attrs_from_btree(file, fheap_addr, bt2_name_addr, false)
+    }
 }
 
 /// Parse an attribute message body.
@@ -1177,9 +1330,20 @@ fn extract_hyperslab(
 fn swap_to_native(dt: &Datatype, data: &mut [u8]) {
     use crate::datatype::ByteOrder;
 
-    let (size, order) = match dt {
+    let (elem_size, order) = match dt {
         Datatype::FixedPoint { size, byte_order, .. } => (*size as usize, *byte_order),
         Datatype::FloatingPoint { size, byte_order, .. } => (*size as usize, *byte_order),
+        Datatype::Complex { base, .. } => {
+            // Swap each component (real, imaginary) using the base float type
+            if let Datatype::FloatingPoint { size: base_size, .. } = base.as_ref() {
+                let bs = *base_size as usize;
+                for chunk in data.chunks_exact_mut(bs) {
+                    // Delegate to the base type for each component
+                    swap_to_native(base, chunk);
+                }
+            }
+            return;
+        }
         _ => return,
     };
 
@@ -1189,11 +1353,11 @@ fn swap_to_native(dt: &Datatype, data: &mut [u8]) {
         order == ByteOrder::LittleEndian
     };
 
-    if !needs_swap || size <= 1 {
+    if !needs_swap || elem_size <= 1 {
         return;
     }
 
-    for chunk in data.chunks_exact_mut(size) {
+    for chunk in data.chunks_exact_mut(elem_size) {
         chunk.reverse();
     }
 }

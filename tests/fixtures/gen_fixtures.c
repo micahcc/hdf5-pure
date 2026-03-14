@@ -789,6 +789,91 @@ static void create_big_endian(const char *filename)
     printf("Created %s\n", filename);
 }
 
+/* Create a group with creation order tracked & indexed for both links and attributes.
+ * Links and attributes are created in non-alphabetical order so creation order
+ * differs from name order. Dense storage is forced by setting phase change to 0. */
+static void create_creation_order(const char *filename)
+{
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_V110, H5F_LIBVER_V110);
+
+    hid_t file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+
+    /* Group creation property: track+index creation order, force dense storage */
+    hid_t gcpl = H5Pcreate(H5P_GROUP_CREATE);
+    H5Pset_link_creation_order(gcpl, H5P_CRT_ORDER_TRACKED | H5P_CRT_ORDER_INDEXED);
+    H5Pset_link_phase_change(gcpl, 0, 0);
+    H5Pset_attr_creation_order(gcpl, H5P_CRT_ORDER_TRACKED | H5P_CRT_ORDER_INDEXED);
+    H5Pset_attr_phase_change(gcpl, 0, 0);
+
+    hid_t grp = H5Gcreate2(file, "ordered", H5P_DEFAULT, gcpl, H5P_DEFAULT);
+
+    /* Create child groups in non-alphabetical order: charlie, alpha, bravo */
+    hid_t g1 = H5Gcreate2(grp, "charlie", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    H5Gclose(g1);
+    hid_t g2 = H5Gcreate2(grp, "alpha", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    H5Gclose(g2);
+    hid_t g3 = H5Gcreate2(grp, "bravo", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    H5Gclose(g3);
+
+    /* Create attributes in non-alphabetical order: zebra, mango, apple */
+    hid_t attr_space = H5Screate(H5S_SCALAR);
+    int32_t val;
+
+    val = 30;
+    hid_t a1 = H5Acreate2(grp, "zebra", H5T_STD_I32LE, attr_space,
+                            H5P_DEFAULT, H5P_DEFAULT);
+    H5Awrite(a1, H5T_NATIVE_INT, &val);
+    H5Aclose(a1);
+
+    val = 10;
+    hid_t a2 = H5Acreate2(grp, "mango", H5T_STD_I32LE, attr_space,
+                            H5P_DEFAULT, H5P_DEFAULT);
+    H5Awrite(a2, H5T_NATIVE_INT, &val);
+    H5Aclose(a2);
+
+    val = 20;
+    hid_t a3 = H5Acreate2(grp, "apple", H5T_STD_I32LE, attr_space,
+                            H5P_DEFAULT, H5P_DEFAULT);
+    H5Awrite(a3, H5T_NATIVE_INT, &val);
+    H5Aclose(a3);
+
+    H5Sclose(attr_space);
+    H5Gclose(grp);
+    H5Pclose(gcpl);
+    H5Fclose(file);
+    H5Pclose(fapl);
+    printf("Created %s\n", filename);
+}
+
+/* Create a dataset of complex double values (HDF5 2.0 native complex type). */
+static void create_complex(const char *filename)
+{
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    /* Complex types require HDF5 2.0 file format */
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_V200, H5F_LIBVER_V200);
+
+    hid_t file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+
+    /* 4-element 1D dataset of complex double */
+    hsize_t dims[1] = {4};
+    hid_t space = H5Screate_simple(1, dims, NULL);
+    hid_t dset = H5Dcreate2(file, "complex_data", H5T_COMPLEX_IEEE_F64LE, space,
+                             H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+
+    /* Values: (1+2i), (3+4i), (-1+0i), (0-5i)
+     * On disk, complex is just two consecutive doubles (real, imag).
+     * Use the file type for both mem and file to write raw doubles. */
+    double values[8] = {1.0, 2.0, 3.0, 4.0, -1.0, 0.0, 0.0, -5.0};
+    H5Dwrite(dset, H5T_COMPLEX_IEEE_F64LE, H5S_ALL, H5S_ALL, H5P_DEFAULT, values);
+
+    H5Dclose(dset);
+    H5Sclose(space);
+    H5Fclose(file);
+    H5Pclose(fapl);
+    printf("Created %s\n", filename);
+}
+
 int main(void)
 {
     create_simple_contiguous("simple_contiguous_v2.h5");
@@ -815,5 +900,7 @@ int main(void)
     create_ea_large("ea_large.h5");
     create_shared_attr("shared_attr.h5");
     create_empty_chunked("empty_chunked.h5");
+    create_creation_order("creation_order.h5");
+    create_complex("complex.h5");
     return 0;
 }

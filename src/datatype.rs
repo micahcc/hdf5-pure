@@ -17,6 +17,7 @@ pub enum DatatypeClass {
     Enum = 8,
     VarLen = 9,
     Array = 10,
+    Complex = 11,
 }
 
 impl DatatypeClass {
@@ -33,6 +34,7 @@ impl DatatypeClass {
             8 => Ok(Self::Enum),
             9 => Ok(Self::VarLen),
             10 => Ok(Self::Array),
+            11 => Ok(Self::Complex),
             _ => Err(Error::UnsupportedDatatypeClass { class: v }),
         }
     }
@@ -152,6 +154,14 @@ pub enum Datatype {
         size: u32,
         bit_precision: u16,
     },
+    /// Complex number type (HDF5 2.0+).
+    ///
+    /// On-disk: two consecutive values of the base floating-point type
+    /// (real part, then imaginary part). `size` = 2 * base element size.
+    Complex {
+        size: u32,
+        base: Box<Datatype>,
+    },
 }
 
 /// A member of a compound datatype.
@@ -200,6 +210,7 @@ impl Datatype {
                 ReferenceType::DatasetRegion => 12,
             },
             Self::Time { size, .. } => *size,
+            Self::Complex { size, .. } => *size,
         }
     }
 
@@ -238,6 +249,7 @@ impl Datatype {
             DatatypeClass::BitField => Self::parse_bitfield(size, class_bits, props),
             DatatypeClass::Reference => Self::parse_reference(class_bits),
             DatatypeClass::Time => Self::parse_time(size, props),
+            DatatypeClass::Complex => Self::parse_complex(size, props),
         }
     }
 
@@ -513,8 +525,16 @@ impl Datatype {
             }
             10 => {
                 // Array: ndims + dim_sizes + element_type
-                // Complex; consume remaining
+                // Complex layout; consume remaining
                 return Ok(data.len());
+            }
+            11 => {
+                // Complex: base floating-point type
+                if data.len() > 8 {
+                    Self::encoded_size(&data[8..])?
+                } else {
+                    0
+                }
             }
             _ => 0,
         };
@@ -720,6 +740,17 @@ impl Datatype {
             }
         };
         Ok(Datatype::Reference { ref_type })
+    }
+
+    fn parse_complex(size: u32, props: &[u8]) -> Result<Self> {
+        // Properties contain the base floating-point datatype message.
+        if props.len() < 8 {
+            return Err(Error::InvalidDatatype {
+                msg: "complex base type truncated".into(),
+            });
+        }
+        let base = Box::new(Datatype::parse(props)?);
+        Ok(Datatype::Complex { size, base })
     }
 
     fn parse_time(size: u32, props: &[u8]) -> Result<Self> {
@@ -1040,6 +1071,37 @@ mod tests {
     fn reject_too_short_message() {
         let data = [0u8; 4];
         assert!(Datatype::parse(&data).is_err());
+    }
+
+    #[test]
+    fn parse_complex_f64() {
+        // Complex of f64 LE: class=11, size=16, props = base f64 datatype
+        let mut base_props = vec![0u8; 12];
+        base_props[2..4].copy_from_slice(&64u16.to_le_bytes()); // bit_precision=64
+        base_props[4] = 52; // exponent_location
+        base_props[5] = 11; // exponent_size
+        base_props[6] = 0; // mantissa_location
+        base_props[7] = 52; // mantissa_size
+        base_props[8..12].copy_from_slice(&1023u32.to_le_bytes()); // exponent_bias
+        let base_msg = build_dt_msg(1, 1, 0, 8, &base_props);
+
+        let msg = build_dt_msg(11, 1, 0, 16, &base_msg);
+        let dt = Datatype::parse(&msg).unwrap();
+        match &dt {
+            Datatype::Complex { size, base } => {
+                assert_eq!(*size, 16);
+                assert_eq!(base.element_size(), 8);
+                match base.as_ref() {
+                    Datatype::FloatingPoint { byte_order, mantissa_size, .. } => {
+                        assert_eq!(*byte_order, ByteOrder::LittleEndian);
+                        assert_eq!(*mantissa_size, 52);
+                    }
+                    other => panic!("expected FloatingPoint base, got {:?}", other),
+                }
+            }
+            other => panic!("expected Complex, got {:?}", other),
+        }
+        assert_eq!(dt.element_size(), 16);
     }
 
     #[test]

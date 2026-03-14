@@ -33,9 +33,9 @@ Pure Rust HDF5 reader targeting superblock v2 and v3 files. WASM-compatible.
 - [x] Internal node parsing (magic `BTIN`, records + child pointers)
 - [x] Tree iteration (walk all records in sorted order)
 - [x] Record type 5: Link Name for indexed groups (hash + heap ID)
-- [ ] Record type 6: Creation Order for indexed groups
+- [x] Record type 6: Creation Order for indexed groups
 - [x] Record type 8: Attribute Name for indexed attributes
-- [ ] Record type 9: Attribute Creation Order
+- [x] Record type 9: Attribute Creation Order
 - [x] Record types 10/11: Chunked dataset indexing
 
 ## Phase 4: Fractal Heap
@@ -65,7 +65,7 @@ Pure Rust HDF5 reader targeting superblock v2 and v3 files. WASM-compatible.
 - [x] Enumeration: base type, member names, values
 - [x] Array: dimensions, element type
 - [x] Variable-length: element type, padding, character set
-- [ ] Complex (HDF5 2.0): base floating-point type
+- [x] Complex (HDF5 2.0): base floating-point type
 
 ## Phase 6: Data Reading
 - [x] Contiguous layout: read raw bytes from file offset
