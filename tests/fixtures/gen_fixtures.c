@@ -874,6 +874,72 @@ static void create_complex(const char *filename)
     printf("Created %s\n", filename);
 }
 
+/* N-bit filter: uint16 with 10-bit precision */
+static void create_nbit(const char *filename)
+{
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_V18, H5F_LIBVER_V18);
+
+    hid_t file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+
+    /* Create datatype: uint16 with 10-bit precision */
+    hid_t dtype = H5Tcopy(H5T_NATIVE_UINT16);
+    H5Tset_precision(dtype, 10);
+    H5Tset_offset(dtype, 0);
+
+    hsize_t dims[1] = {8};
+    hsize_t chunk_dims[1] = {8};
+    hid_t space = H5Screate_simple(1, dims, NULL);
+
+    hid_t dcpl = H5Pcreate(H5P_DATASET_CREATE);
+    H5Pset_chunk(dcpl, 1, chunk_dims);
+    H5Pset_nbit(dcpl);
+
+    hid_t dset = H5Dcreate2(file, "data", dtype, space,
+                             H5P_DEFAULT, dcpl, H5P_DEFAULT);
+
+    uint16_t values[8] = {0, 100, 200, 300, 400, 500, 600, 700};
+    H5Dwrite(dset, H5T_NATIVE_UINT16, H5S_ALL, H5S_ALL, H5P_DEFAULT, values);
+
+    H5Dclose(dset);
+    H5Sclose(space);
+    H5Tclose(dtype);
+    H5Pclose(dcpl);
+    H5Fclose(file);
+    H5Pclose(fapl);
+    printf("Created %s\n", filename);
+}
+
+/* Scale-offset filter: int32 with SO_INT */
+static void create_scaleoffset(const char *filename)
+{
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_V18, H5F_LIBVER_V18);
+
+    hid_t file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+
+    hsize_t dims[1] = {8};
+    hsize_t chunk_dims[1] = {8};
+    hid_t space = H5Screate_simple(1, dims, NULL);
+
+    hid_t dcpl = H5Pcreate(H5P_DATASET_CREATE);
+    H5Pset_chunk(dcpl, 1, chunk_dims);
+    H5Pset_scaleoffset(dcpl, H5Z_SO_INT, H5Z_SO_INT_MINBITS_DEFAULT);
+
+    hid_t dset = H5Dcreate2(file, "data", H5T_NATIVE_INT32, space,
+                             H5P_DEFAULT, dcpl, H5P_DEFAULT);
+
+    int32_t values[8] = {1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007};
+    H5Dwrite(dset, H5T_NATIVE_INT32, H5S_ALL, H5S_ALL, H5P_DEFAULT, values);
+
+    H5Dclose(dset);
+    H5Sclose(space);
+    H5Pclose(dcpl);
+    H5Fclose(file);
+    H5Pclose(fapl);
+    printf("Created %s\n", filename);
+}
+
 int main(void)
 {
     create_simple_contiguous("simple_contiguous_v2.h5");
@@ -902,5 +968,7 @@ int main(void)
     create_empty_chunked("empty_chunked.h5");
     create_creation_order("creation_order.h5");
     create_complex("complex.h5");
+    create_nbit("nbit.h5");
+    create_scaleoffset("scaleoffset.h5");
     return 0;
 }

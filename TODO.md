@@ -84,8 +84,8 @@ Pure Rust HDF5 reader targeting superblock v2 and v3 files. WASM-compatible.
 - [x] Deflate (zlib) decompression via `flate2`
 - [x] Shuffle (byte de-interleaving)
 - [x] Fletcher32 checksum verification
-- [ ] N-bit filter
-- [ ] Scale-offset filter
+- [x] N-bit filter
+- [x] Scale-offset filter
 - [-] SZIP decompression — **won't implement**. HDF5's SZIP format is not standard CCSDS 121.0;
       no pure Rust decoder exists. Would require native libaec FFI, breaking WASM compatibility.
 

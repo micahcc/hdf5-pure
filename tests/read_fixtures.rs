@@ -927,3 +927,39 @@ fn read_complex_dataset() {
     assert_eq!(values[2], (-1.0, 0.0));  // -1+0i
     assert_eq!(values[3], (0.0, -5.0));  // 0-5i
 }
+
+#[test]
+fn read_nbit_dataset() {
+    let file = hdf5_reader::File::open("tests/fixtures/nbit.h5").unwrap();
+    let root = file.root_group().unwrap();
+    let ds = root.dataset("data").unwrap();
+
+    let raw = ds.read_raw().unwrap();
+    // 8 uint16 elements = 16 bytes
+    assert_eq!(raw.len(), 16);
+
+    let values: Vec<u16> = raw
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+
+    assert_eq!(values, vec![0, 100, 200, 300, 400, 500, 600, 700]);
+}
+
+#[test]
+fn read_scaleoffset_dataset() {
+    let file = hdf5_reader::File::open("tests/fixtures/scaleoffset.h5").unwrap();
+    let root = file.root_group().unwrap();
+    let ds = root.dataset("data").unwrap();
+
+    let raw = ds.read_raw().unwrap();
+    // 8 int32 elements = 32 bytes
+    assert_eq!(raw.len(), 32);
+
+    let values: Vec<i32> = raw
+        .chunks_exact(4)
+        .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+
+    assert_eq!(values, vec![1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007]);
+}
