@@ -220,7 +220,6 @@ fn apply_filter_reverse(filter: &Filter, data: Vec<u8>) -> Result<Vec<u8>> {
             })
         }
         FILTER_SZIP => {
-            // TODO: SZIP (Rice/AEC) decompression
             Err(Error::UnsupportedFilter {
                 id: filter.id,
                 name: "szip".into(),

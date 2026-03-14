@@ -156,6 +156,123 @@ impl<R: ReadAt + ?Sized> File<R> {
     fn size_of_lengths(&self) -> u8 {
         self.superblock.size_of_lengths
     }
+
+    /// Resolve a shared message record to the actual message data.
+    ///
+    /// When a message has the "shared" flag set, its body is a shared message
+    /// record pointing elsewhere — typically a committed datatype. This reads
+    /// the object header at the target address and extracts the real message.
+    fn resolve_shared_message(
+        &self,
+        data: &[u8],
+        expected_type: MessageType,
+    ) -> Result<Vec<u8>> {
+        if data.is_empty() {
+            return Err(Error::InvalidObjectHeader {
+                msg: "empty shared message record".into(),
+            });
+        }
+
+        let so = self.size_of_offsets();
+        let o = so as usize;
+        let version = data[0];
+
+        let addr = match version {
+            1 => {
+                // v1: flags(1) + reserved(6) + address(O)
+                if data.len() < 8 + o {
+                    return Err(Error::InvalidObjectHeader {
+                        msg: "shared message v1 record too short".into(),
+                    });
+                }
+                read_offset_from_slice(data, 8, so)
+            }
+            2 => {
+                // v2: type(1) + address(O) [type 0] or heap_id [type 1]
+                if data.len() < 2 {
+                    return Err(Error::InvalidObjectHeader {
+                        msg: "shared message v2 record too short".into(),
+                    });
+                }
+                let stype = data[1];
+                if stype == 1 {
+                    return Err(Error::Other {
+                        msg: "shared object header message (SOHM) heap lookup not supported".into(),
+                    });
+                }
+                if data.len() < 2 + o {
+                    return Err(Error::InvalidObjectHeader {
+                        msg: "shared message v2 record too short for address".into(),
+                    });
+                }
+                read_offset_from_slice(data, 2, so)
+            }
+            3 => {
+                // v3: type(1) + address(O) [types 0/2] or heap_id(8) [type 1]
+                if data.len() < 2 {
+                    return Err(Error::InvalidObjectHeader {
+                        msg: "shared message v3 record too short".into(),
+                    });
+                }
+                let stype = data[1];
+                match stype {
+                    0 | 2 => {
+                        // 0 = shared in another object header
+                        // 2 = committed message (named datatype)
+                        if data.len() < 2 + o {
+                            return Err(Error::InvalidObjectHeader {
+                                msg: "shared message v3 record too short for address".into(),
+                            });
+                        }
+                        read_offset_from_slice(data, 2, so)
+                    }
+                    1 => {
+                        return Err(Error::Other {
+                            msg: "shared object header message (SOHM) heap lookup not supported"
+                                .into(),
+                        });
+                    }
+                    _ => {
+                        return Err(Error::InvalidObjectHeader {
+                            msg: format!("unknown shared message type {}", stype),
+                        });
+                    }
+                }
+            }
+            _ => {
+                return Err(Error::InvalidObjectHeader {
+                    msg: format!("unsupported shared message version {}", version),
+                });
+            }
+        };
+
+        if addr == u64::MAX {
+            return Err(Error::InvalidObjectHeader {
+                msg: "shared message points to undefined address".into(),
+            });
+        }
+
+        // Read the object header at the target address and find the matching message
+        let header = ObjectHeader::parse(
+            &*self.reader,
+            addr,
+            self.size_of_offsets(),
+            self.size_of_lengths(),
+        )?;
+
+        for msg in &header.messages {
+            if msg.msg_type == expected_type {
+                return Ok(msg.data.clone());
+            }
+        }
+
+        Err(Error::InvalidObjectHeader {
+            msg: format!(
+                "shared message target at {:#x} has no {:?} message",
+                addr, expected_type
+            ),
+        })
+    }
 }
 
 /// A node in the HDF5 hierarchy — either a group or a dataset.
@@ -356,6 +473,13 @@ impl<'a, R: ReadAt + ?Sized> Dataset<'a, R> {
     pub fn datatype(&self) -> Result<Datatype> {
         for msg in &self.header.messages {
             if msg.msg_type == MessageType::Datatype {
+                if msg.is_shared() {
+                    let resolved = self.file.resolve_shared_message(
+                        &msg.data,
+                        MessageType::Datatype,
+                    )?;
+                    return Datatype::parse(&resolved);
+                }
                 return Datatype::parse(&msg.data);
             }
         }
@@ -368,6 +492,13 @@ impl<'a, R: ReadAt + ?Sized> Dataset<'a, R> {
     pub fn dataspace(&self) -> Result<Dataspace> {
         for msg in &self.header.messages {
             if msg.msg_type == MessageType::Dataspace {
+                if msg.is_shared() {
+                    let resolved = self.file.resolve_shared_message(
+                        &msg.data,
+                        MessageType::Dataspace,
+                    )?;
+                    return Dataspace::parse(&resolved);
+                }
                 return Dataspace::parse(&msg.data);
             }
         }
@@ -401,7 +532,15 @@ impl<'a, R: ReadAt + ?Sized> Dataset<'a, R> {
     pub fn filters(&self) -> Result<Option<FilterPipeline>> {
         for msg in &self.header.messages {
             if msg.msg_type == MessageType::FilterPipeline {
-                return Ok(Some(FilterPipeline::parse(&msg.data)?));
+                let data = if msg.is_shared() {
+                    self.file.resolve_shared_message(
+                        &msg.data,
+                        MessageType::FilterPipeline,
+                    )?
+                } else {
+                    msg.data.clone()
+                };
+                return Ok(Some(FilterPipeline::parse(&data)?));
             }
         }
         Ok(None)
@@ -411,7 +550,21 @@ impl<'a, R: ReadAt + ?Sized> Dataset<'a, R> {
     pub fn fill_value(&self) -> Result<FillValue> {
         for msg in &self.header.messages {
             if msg.msg_type == MessageType::FillValue {
-                return FillValue::parse(&msg.data);
+                let data = if msg.is_shared() {
+                    self.file.resolve_shared_message(
+                        &msg.data,
+                        MessageType::FillValue,
+                    )?
+                } else {
+                    msg.data.clone()
+                };
+                return FillValue::parse(&data);
+            }
+        }
+        // Fallback: check for Fill Value Old (0x0004)
+        for msg in &self.header.messages {
+            if msg.msg_type == MessageType::FillValueOld {
+                return FillValue::parse_old(&msg.data);
             }
         }
         Ok(FillValue {
@@ -483,6 +636,92 @@ impl<'a, R: ReadAt + ?Sized> Dataset<'a, R> {
         }
     }
 
+    /// Read a hyperslab (rectangular sub-region) of the dataset.
+    ///
+    /// `start`: the starting index in each dimension.
+    /// `count`: the number of elements to read in each dimension.
+    ///
+    /// Returns a flat byte buffer in row-major order containing only the
+    /// selected elements. The caller interprets bytes according to `datatype()`.
+    pub fn read_slice(&self, start: &[u64], count: &[u64]) -> Result<Vec<u8>> {
+        let dspace = self.dataspace()?;
+        let dataset_dims = dspace.shape();
+        let ndims = dataset_dims.len();
+
+        if start.len() != ndims || count.len() != ndims {
+            return Err(Error::Other {
+                msg: format!(
+                    "selection rank ({}/{}) doesn't match dataset rank ({})",
+                    start.len(),
+                    count.len(),
+                    ndims
+                ),
+            });
+        }
+
+        for i in 0..ndims {
+            if start[i] + count[i] > dataset_dims[i] {
+                return Err(Error::Other {
+                    msg: format!(
+                        "selection [{}, {}) exceeds dimension {} size {}",
+                        start[i],
+                        start[i] + count[i],
+                        i,
+                        dataset_dims[i]
+                    ),
+                });
+            }
+        }
+
+        let dtype = self.datatype()?;
+        let element_size = dtype.element_size() as usize;
+        let layout = self.layout()?;
+        let filters = self.filters()?;
+
+        match layout {
+            DataLayout::Compact { data } => {
+                let raw = if let Some(pipeline) = &filters {
+                    pipeline.decompress(data)?
+                } else {
+                    data
+                };
+                Ok(extract_hyperslab(&raw, dataset_dims, start, count, element_size))
+            }
+            DataLayout::Contiguous { address, size } => {
+                let raw = if address == u64::MAX {
+                    vec![0u8; size as usize]
+                } else {
+                    let mut buf = vec![0u8; size as usize];
+                    self.file.reader.read_exact_at(address, &mut buf).map_err(Error::Io)?;
+                    if let Some(pipeline) = &filters {
+                        pipeline.decompress(buf)?
+                    } else {
+                        buf
+                    }
+                };
+                Ok(extract_hyperslab(&raw, dataset_dims, start, count, element_size))
+            }
+            DataLayout::Chunked { .. } => {
+                let max_dims = dspace.max_dimensions();
+                crate::chunk::read_chunked_slice(
+                    &*self.file.reader,
+                    &layout,
+                    dataset_dims,
+                    element_size as u32,
+                    &filters,
+                    self.file.size_of_offsets(),
+                    self.file.size_of_lengths(),
+                    max_dims,
+                    start,
+                    count,
+                )
+            }
+            DataLayout::Virtual { .. } => Err(Error::Other {
+                msg: "virtual dataset reading not supported".into(),
+            }),
+        }
+    }
+
     /// Read a variable-length dataset, resolving global heap references.
     ///
     /// Returns one `Vec<u8>` per element, containing the resolved vlen data.
@@ -516,6 +755,18 @@ impl<'a, R: ReadAt + ?Sized> Dataset<'a, R> {
                     .to_string()
             })
             .collect())
+    }
+
+    /// Read the dataset and convert to native byte order if necessary.
+    ///
+    /// If the on-disk data is big-endian on a little-endian platform (or vice
+    /// versa), each element is byte-swapped in place. This only applies to
+    /// fixed-point and floating-point types. Other types are returned as-is.
+    pub fn read_native(&self) -> Result<Vec<u8>> {
+        let mut data = self.read_raw()?;
+        let dt = self.datatype()?;
+        swap_to_native(&dt, &mut data);
+        Ok(data)
     }
 }
 
@@ -578,6 +829,29 @@ impl FillValue {
         Ok(FillValue {
             defined: true,
             value: Some(data[8..8 + size].to_vec()),
+        })
+    }
+
+    /// Parse an old-style fill value message (type 0x0004).
+    ///
+    /// Format: size(u32) + fill_value_bytes. No version or flags.
+    pub fn parse_old(data: &[u8]) -> Result<Self> {
+        if data.len() < 4 {
+            return Ok(FillValue {
+                defined: false,
+                value: None,
+            });
+        }
+        let size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        if size == 0 || data.len() < 4 + size {
+            return Ok(FillValue {
+                defined: true,
+                value: None,
+            });
+        }
+        Ok(FillValue {
+            defined: true,
+            value: Some(data[4..4 + size].to_vec()),
         })
     }
 
@@ -830,6 +1104,83 @@ fn parse_attribute_message(data: &[u8]) -> Result<Attribute> {
         dataspace,
         raw_value,
     })
+}
+
+/// Extract a hyperslab from a flat row-major buffer.
+fn extract_hyperslab(
+    data: &[u8],
+    dims: &[u64],
+    start: &[u64],
+    count: &[u64],
+    element_size: usize,
+) -> Vec<u8> {
+    let ndims = dims.len();
+    let out_elems: usize = count.iter().map(|&c| c as usize).product();
+    let mut output = vec![0u8; out_elems * element_size];
+
+    if ndims == 0 || out_elems == 0 {
+        return output;
+    }
+
+    // Compute source strides (row-major, in bytes)
+    let mut src_strides = vec![element_size; ndims];
+    for i in (0..ndims - 1).rev() {
+        src_strides[i] = src_strides[i + 1] * dims[i + 1] as usize;
+    }
+
+    // Number of contiguous rows (innermost dim)
+    let inner_count = count[ndims - 1] as usize * element_size;
+    let nrows: usize = count[..ndims - 1].iter().map(|&c| c as usize).product::<usize>().max(1);
+
+    for row in 0..nrows {
+        let mut remaining = row;
+        let mut src_off = 0usize;
+        let dst_off = row * inner_count;
+
+        for i in 0..ndims - 1 {
+            let rows_below: usize = count[i + 1..ndims - 1]
+                .iter()
+                .map(|&c| c as usize)
+                .product::<usize>()
+                .max(1);
+            let idx = remaining / rows_below;
+            remaining %= rows_below;
+            src_off += (start[i] as usize + idx) * src_strides[i];
+        }
+        src_off += start[ndims - 1] as usize * element_size;
+
+        if src_off + inner_count <= data.len() && dst_off + inner_count <= output.len() {
+            output[dst_off..dst_off + inner_count]
+                .copy_from_slice(&data[src_off..src_off + inner_count]);
+        }
+    }
+
+    output
+}
+
+/// Byte-swap data in place if the datatype's byte order differs from native.
+fn swap_to_native(dt: &Datatype, data: &mut [u8]) {
+    use crate::datatype::ByteOrder;
+
+    let (size, order) = match dt {
+        Datatype::FixedPoint { size, byte_order, .. } => (*size as usize, *byte_order),
+        Datatype::FloatingPoint { size, byte_order, .. } => (*size as usize, *byte_order),
+        _ => return,
+    };
+
+    let needs_swap = if cfg!(target_endian = "little") {
+        order == ByteOrder::BigEndian
+    } else {
+        order == ByteOrder::LittleEndian
+    };
+
+    if !needs_swap || size <= 1 {
+        return;
+    }
+
+    for chunk in data.chunks_exact_mut(size) {
+        chunk.reverse();
+    }
 }
 
 fn read_offset_from_slice(data: &[u8], offset: usize, size: u8) -> u64 {

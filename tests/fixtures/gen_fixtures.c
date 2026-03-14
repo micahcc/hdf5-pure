@@ -596,6 +596,132 @@ static void create_btree_v2_chunks(const char *filename)
     printf("Created %s\n", filename);
 }
 
+/* Create a chunked dataset with SZIP compression. */
+static void create_szip_compressed(const char *filename)
+{
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_V110, H5F_LIBVER_V110);
+
+    hid_t file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+
+    /* 1D dataset: 32 int32 values, SZIP-compressed */
+    hsize_t dims[1] = {32};
+    hid_t space = H5Screate_simple(1, dims, NULL);
+
+    hid_t dcpl = H5Pcreate(H5P_DATASET_CREATE);
+    hsize_t chunk_dims[1] = {32};
+    H5Pset_chunk(dcpl, 1, chunk_dims);
+    /* SZIP: NN mode, 8 pixels per block */
+    H5Pset_szip(dcpl, H5_SZIP_NN_OPTION_MASK, 8);
+
+    hid_t dset = H5Dcreate2(file, "szip_data", H5T_STD_I32LE, space,
+                             H5P_DEFAULT, dcpl, H5P_DEFAULT);
+    int32_t vals[32];
+    for (int i = 0; i < 32; i++) vals[i] = i * i;
+    H5Dwrite(dset, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, vals);
+
+    H5Dclose(dset);
+    H5Pclose(dcpl);
+    H5Sclose(space);
+    H5Fclose(file);
+    H5Pclose(fapl);
+    printf("Created %s\n", filename);
+}
+
+/* Create a dataset with a committed (named) datatype. */
+static void create_committed_datatype(const char *filename)
+{
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_V110, H5F_LIBVER_V110);
+
+    hid_t file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+
+    /* Create and commit a named datatype */
+    hid_t dtype = H5Tcopy(H5T_STD_I32LE);
+    H5Tcommit2(file, "mytype", dtype, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+
+    /* Create two datasets that share the committed type */
+    hsize_t dims[1] = {5};
+    hid_t space = H5Screate_simple(1, dims, NULL);
+    hid_t ds1 = H5Dcreate2(file, "data1", dtype, space,
+                             H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    hid_t ds2 = H5Dcreate2(file, "data2", dtype, space,
+                             H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+
+    int32_t vals1[5] = {10, 20, 30, 40, 50};
+    int32_t vals2[5] = {100, 200, 300, 400, 500};
+    H5Dwrite(ds1, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, vals1);
+    H5Dwrite(ds2, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, vals2);
+
+    H5Dclose(ds2);
+    H5Dclose(ds1);
+    H5Sclose(space);
+    H5Tclose(dtype);
+    H5Fclose(file);
+    H5Pclose(fapl);
+    printf("Created %s\n", filename);
+}
+
+/* Create a chunked dataset large enough that EA data blocks are needed
+ * (elements overflow the index block). */
+static void create_ea_large(const char *filename)
+{
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_V110, H5F_LIBVER_V110);
+
+    hid_t file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+
+    /* 1D dataset: 100 elements, chunk size 4 → 25 chunks.
+     * With one unlimited dim → extensible array index.
+     * The default idx_blk_elmts is typically 2-4, so most chunks
+     * will be in data blocks. */
+    hsize_t dims[1] = {100};
+    hsize_t maxdims[1] = {H5S_UNLIMITED};
+    hid_t space = H5Screate_simple(1, dims, maxdims);
+
+    hid_t dcpl = H5Pcreate(H5P_DATASET_CREATE);
+    hsize_t chunk_dims[1] = {4};
+    H5Pset_chunk(dcpl, 1, chunk_dims);
+
+    hid_t dset = H5Dcreate2(file, "large_ea", H5T_STD_I32LE, space,
+                             H5P_DEFAULT, dcpl, H5P_DEFAULT);
+
+    int32_t vals[100];
+    for (int i = 0; i < 100; i++) vals[i] = i * 10;
+    H5Dwrite(dset, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, vals);
+
+    H5Dclose(dset);
+    H5Pclose(dcpl);
+    H5Sclose(space);
+    H5Fclose(file);
+    H5Pclose(fapl);
+    printf("Created %s\n", filename);
+}
+
+/* Create a big-endian dataset for testing byte-swap on read. */
+static void create_big_endian(const char *filename)
+{
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_V110, H5F_LIBVER_V110);
+
+    hid_t file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+
+    hsize_t dims[1] = {6};
+    hid_t space = H5Screate_simple(1, dims, NULL);
+
+    /* Store as big-endian int32 */
+    hid_t dset = H5Dcreate2(file, "be_data", H5T_STD_I32BE, space,
+                             H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    int32_t vals[6] = {1, 256, 65536, -1, 1000000, 0};
+    H5Dwrite(dset, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, vals);
+
+    H5Dclose(dset);
+    H5Sclose(space);
+    H5Fclose(file);
+    H5Pclose(fapl);
+    printf("Created %s\n", filename);
+}
+
 int main(void)
 {
     create_simple_contiguous("simple_contiguous_v2.h5");
@@ -616,5 +742,9 @@ int main(void)
     create_fill_value("fill_value.h5");
     create_dense_attributes("dense_attributes.h5");
     create_btree_v2_chunks("btree_v2_chunks.h5");
+    create_szip_compressed("szip_compressed.h5");
+    create_big_endian("big_endian.h5");
+    create_committed_datatype("committed_datatype.h5");
+    create_ea_large("ea_large.h5");
     return 0;
 }

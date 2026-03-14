@@ -196,6 +196,150 @@ pub fn read_chunked<R: ReadAt + ?Sized>(
     Ok(output)
 }
 
+/// Read a hyperslab from a chunked dataset, only reading overlapping chunks.
+pub fn read_chunked_slice<R: ReadAt + ?Sized>(
+    reader: &R,
+    layout: &DataLayout,
+    dataset_dims: &[u64],
+    element_size: u32,
+    filters: &Option<FilterPipeline>,
+    size_of_offsets: u8,
+    size_of_lengths: u8,
+    max_dims: Option<&[u64]>,
+    start: &[u64],
+    count: &[u64],
+) -> Result<Vec<u8>> {
+    let (chunk_dims, address, chunk_index_type, _chunk_flags, layout_version,
+         single_filtered_size, single_filter_mask) = match layout {
+        DataLayout::Chunked {
+            chunk_dims, address, chunk_index_type, chunk_flags,
+            layout_version, single_chunk_filtered_size, single_chunk_filter_mask, ..
+        } => (chunk_dims, *address, chunk_index_type, *chunk_flags, *layout_version,
+              *single_chunk_filtered_size, *single_chunk_filter_mask),
+        _ => return Err(Error::InvalidLayout { msg: "expected chunked layout".into() }),
+    };
+
+    let ndims = dataset_dims.len();
+    let actual_chunk_dims: Vec<u32>;
+    let chunk_dims = if chunk_dims.len() == ndims + 1 {
+        actual_chunk_dims = chunk_dims[..ndims].to_vec();
+        &actual_chunk_dims
+    } else {
+        chunk_dims
+    };
+
+    let chunk_elems: u64 = chunk_dims.iter().map(|&d| d as u64).product();
+    let chunk_byte_size = chunk_elems * element_size as u64;
+    let elem = element_size as usize;
+
+    // Output buffer for the selection
+    let out_elems: u64 = count.iter().product();
+    let mut output = vec![0u8; (out_elems * element_size as u64) as usize];
+
+    // Compute output strides (row-major, in bytes)
+    let mut out_strides = vec![elem; ndims];
+    for i in (0..ndims - 1).rev() {
+        out_strides[i] = out_strides[i + 1] * count[i + 1] as usize;
+    }
+
+    // Collect chunk entries (reuse the same logic as read_chunked)
+    let entries = if layout_version == 3 {
+        let v3_ndims = ndims + 1;
+        read_btree_v1_entries(reader, address, dataset_dims, chunk_dims, v3_ndims, size_of_offsets)?
+    } else {
+        let idx_type = chunk_index_type.unwrap_or(ChunkIndexType::SingleChunk);
+        match idx_type {
+            ChunkIndexType::SingleChunk => read_single_chunk_entries(address, chunk_byte_size, single_filtered_size, single_filter_mask, ndims)?,
+            ChunkIndexType::Implicit => read_implicit_chunk_entries(address, dataset_dims, chunk_dims, chunk_byte_size)?,
+            ChunkIndexType::FixedArray => read_fixed_array_entries(reader, address, dataset_dims, chunk_dims, filters.is_some(), size_of_offsets, size_of_lengths)?,
+            ChunkIndexType::ExtensibleArray => read_extensible_array_entries(reader, address, dataset_dims, chunk_dims, filters.is_some(), size_of_offsets, size_of_lengths)?,
+            ChunkIndexType::BTreeV2 => read_btree_v2_chunk_entries(reader, address, dataset_dims, chunk_dims, element_size, filters.is_some(), size_of_offsets, size_of_lengths, max_dims)?,
+        }
+    };
+
+    // For each chunk, check if it overlaps the selection
+    for entry in &entries {
+        if entry.address == u64::MAX {
+            continue;
+        }
+
+        // Chunk covers [chunk_start[i], chunk_end[i]) in each dimension
+        let mut overlaps = true;
+        for i in 0..ndims {
+            let cs = entry.scaled[i] * chunk_dims[i] as u64;
+            let ce = (cs + chunk_dims[i] as u64).min(dataset_dims[i]);
+            let ss = start[i];
+            let se = start[i] + count[i];
+            if cs >= se || ce <= ss {
+                overlaps = false;
+                break;
+            }
+        }
+        if !overlaps {
+            continue;
+        }
+
+        // Read and decompress chunk
+        let read_size = if entry.filtered_size > 0 { entry.filtered_size as usize } else { chunk_byte_size as usize };
+        let mut chunk_data = vec![0u8; read_size];
+        reader.read_exact_at(entry.address, &mut chunk_data).map_err(Error::Io)?;
+        if let Some(pipeline) = filters {
+            if entry.filter_mask == 0 {
+                chunk_data = pipeline.decompress(chunk_data)?;
+            }
+        }
+
+        // Compute chunk strides
+        let mut ch_strides = vec![elem; ndims];
+        for i in (0..ndims - 1).rev() {
+            ch_strides[i] = ch_strides[i + 1] * chunk_dims[i + 1] as usize;
+        }
+
+        // Compute overlap region in dataset coordinates
+        let mut ov_start = vec![0u64; ndims];
+        let mut ov_count = vec![0u64; ndims];
+        for i in 0..ndims {
+            let cs = entry.scaled[i] * chunk_dims[i] as u64;
+            let ce = (cs + chunk_dims[i] as u64).min(dataset_dims[i]);
+            ov_start[i] = start[i].max(cs);
+            let ov_end = (start[i] + count[i]).min(ce);
+            ov_count[i] = ov_end - ov_start[i];
+        }
+
+        // Copy the overlap region from chunk to output, row by row
+        let inner_count = ov_count[ndims - 1] as usize * elem;
+        let nrows: usize = ov_count[..ndims - 1].iter().map(|&c| c as usize).product::<usize>().max(1);
+
+        for row in 0..nrows {
+            let mut remaining = row;
+            let mut src_off = 0usize;
+            let mut dst_off = 0usize;
+
+            for i in 0..ndims - 1 {
+                let rows_below: usize = ov_count[i + 1..ndims - 1]
+                    .iter().map(|&c| c as usize).product::<usize>().max(1);
+                let idx = remaining / rows_below;
+                remaining %= rows_below;
+                // Source offset within chunk
+                src_off += (ov_start[i] - entry.scaled[i] * chunk_dims[i] as u64) as usize * ch_strides[i]
+                    + idx * ch_strides[i];
+                // Dest offset within output
+                dst_off += (ov_start[i] - start[i]) as usize * out_strides[i]
+                    + idx * out_strides[i];
+            }
+            src_off += (ov_start[ndims - 1] - entry.scaled[ndims - 1] * chunk_dims[ndims - 1] as u64) as usize * elem;
+            dst_off += (ov_start[ndims - 1] - start[ndims - 1]) as usize * elem;
+
+            if src_off + inner_count <= chunk_data.len() && dst_off + inner_count <= output.len() {
+                output[dst_off..dst_off + inner_count]
+                    .copy_from_slice(&chunk_data[src_off..src_off + inner_count]);
+            }
+        }
+    }
+
+    Ok(output)
+}
+
 /// Single chunk: there's exactly one chunk covering the entire dataset.
 fn read_single_chunk_entries(
     address: u64,
@@ -434,7 +578,7 @@ fn read_extensible_array_entries<R: ReadAt + ?Sized>(
     let _version = Le::read_u8(reader, header_addr + 4).map_err(Error::Io)?;
     let _client_id = Le::read_u8(reader, header_addr + 5).map_err(Error::Io)?;
     let elmt_size = Le::read_u8(reader, header_addr + 6).map_err(Error::Io)? as usize;
-    let _max_nelmts_bits = Le::read_u8(reader, header_addr + 7).map_err(Error::Io)?;
+    let max_nelmts_bits = Le::read_u8(reader, header_addr + 7).map_err(Error::Io)?;
     let idx_blk_elmts = Le::read_u8(reader, header_addr + 8).map_err(Error::Io)? as u64;
     let data_blk_min_elmts = Le::read_u8(reader, header_addr + 9).map_err(Error::Io)? as u64;
     let sup_blk_min_data_ptrs = Le::read_u8(reader, header_addr + 10).map_err(Error::Io)? as u64;
@@ -546,6 +690,7 @@ fn read_extensible_array_entries<R: ReadAt + ?Sized>(
             es,
             &chunks_per_dim,
             &mut entries,
+            max_nelmts_bits,
         )?;
         global_idx += dblk_nelmts;
     }
@@ -582,7 +727,7 @@ fn read_extensible_array_entries<R: ReadAt + ?Sized>(
         }
 
         // Super block: magic(4) + version(1) + client_id(1) + hdr_addr(O) + arr_off(varies)
-        let arr_off_size = ((_max_nelmts_bits + 7) / 8) as u64;
+        let arr_off_size = ((max_nelmts_bits as u64 + 7) / 8).max(1);
         let sb_prefix = 4 + 1 + 1 + o + arr_off_size;
 
         // Number of data blocks in this super block: doubles with each super block pair
@@ -619,6 +764,7 @@ fn read_extensible_array_entries<R: ReadAt + ?Sized>(
                 es,
                 &chunks_per_dim,
                 &mut entries,
+                max_nelmts_bits,
             )?;
             global_idx += sblk_dblk_nelmts;
         }
@@ -665,14 +811,15 @@ fn read_ea_element<R: ReadAt + ?Sized>(
 fn read_ea_data_block_entries<R: ReadAt + ?Sized>(
     reader: &R,
     dblk_addr: u64,
-    _dblk_nelmts: u64,
-    _global_start_idx: u64,
-    _max_idx_set: u64,
-    _has_filters: bool,
+    dblk_nelmts: u64,
+    global_start_idx: u64,
+    max_idx_set: u64,
+    has_filters: bool,
     size_of_offsets: u8,
-    _elmt_size: usize,
-    _chunks_per_dim: &[u64],
-    _entries: &mut Vec<ChunkEntry>,
+    elmt_size: usize,
+    chunks_per_dim: &[u64],
+    entries: &mut Vec<ChunkEntry>,
+    max_nelmts_bits: u8,
 ) -> Result<()> {
     let o = size_of_offsets as u64;
 
@@ -690,45 +837,25 @@ fn read_ea_data_block_entries<R: ReadAt + ?Sized>(
     }
 
     // Data block prefix: magic(4) + version(1) + client_id(1) + hdr_addr(O) + arr_off(varies)
-    // arr_off_size is at least 1 byte
-    // For simplicity, we skip the arr_off field (just need to find where elements start)
-    // prefix = 4 + 1 + 1 + O + arr_off_size
-    // We can figure out arr_off_size from the remaining space, but let's compute it properly
-    // from max_nelmts_bits (passed through). For now, scan past the prefix:
-    // Actually, the arr_off_size is ceil(max_nelmts_bits/8). We need this from the header.
-    // Since we don't pass it here, assume it's included in a fixed prefix.
-    // Let's pass it as a parameter... Actually for simplicity, the data block elements start
-    // after magic(4) + version(1) + client_id(1) + hdr_addr(O).
-    // But there's also the array offset field. Let me handle this properly.
+    let arr_off_size = ((max_nelmts_bits as u64 + 7) / 8).max(1);
+    let prefix_size = 4 + 1 + 1 + o + arr_off_size;
+    let elmts_start = dblk_addr + prefix_size;
 
-    // For now: skip magic(4) + version(1) + client_id(1) + hdr_addr(O)
-    // The arr_off field follows, but we need to know its size.
-    // Since we can't compute it here without max_nelmts_bits, we'll use a simpler approach:
-    // The data block has no arr_off for the blocks directly in the index block.
-    // Actually all EA data blocks have arr_off. Let me just compute from what we have.
+    let count = dblk_nelmts.min(max_idx_set.saturating_sub(global_start_idx));
+    for i in 0..count {
+        let entry = read_ea_element(
+            reader,
+            elmts_start + i * elmt_size as u64,
+            global_start_idx + i,
+            has_filters,
+            size_of_offsets,
+            elmt_size,
+            chunks_per_dim,
+        )?;
+        entries.push(entry);
+    }
 
-    // We'll estimate arr_off_size by reading past the known prefix.
-    // Actually, this is getting complex. Let me just not read the arr_off and instead
-    // compute elements start as: prefix_size + arr_off_size
-    // We'll need to thread max_nelmts_bits through. For now, let me just skip it
-    // by reading the hdr_addr and computing the prefix size from that.
-
-    // Fixed part: magic(4) + version(1) + client_id(1) + hdr_addr(O)
-    let _fixed_prefix = 4 + 1 + 1 + o;
-    // After fixed_prefix: arr_off (variable width), then elements
-    // We don't know arr_off_size here, so let's skip it by computing from context.
-    // For typical cases: arr_off_size = ceil(max_nelmts_bits / 8)
-    // We'll just use 1 byte as a reasonable default for small datasets... No, that's fragile.
-
-    // Better approach: read a small region and detect element start by looking at structure.
-    // Actually the cleanest fix: pass arr_off_size as parameter.
-    // But for now, we don't call this function (our fixture has all elements in the index block).
-    // Let me add arr_off_size parameter for correctness.
-
-    // For now, use a conservative approach — we don't have any test case that hits this path yet.
-    return Err(Error::Other {
-        msg: "extensible array data blocks not yet implemented (elements fit in index block for most datasets)".into(),
-    });
+    Ok(())
 }
 
 /// B-tree v1 signature: `TREE`

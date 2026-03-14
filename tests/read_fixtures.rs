@@ -569,6 +569,30 @@ fn read_fill_value() {
     assert_eq!(values, vec![10, 20, 30, 40, -999, -999]);
 }
 
+// ── Fill Value Old (type 0x0004) ──
+
+#[test]
+fn fill_value_old_parse() {
+    use hdf5_reader::FillValue;
+
+    // Old fill value format: size(u32 LE) + raw bytes
+    let data = [
+        0x04, 0x00, 0x00, 0x00, // size = 4
+        0x19, 0xFC, 0xFF, 0xFF, // -999 as i32 LE
+    ];
+    let fv = FillValue::parse_old(&data).unwrap();
+    assert!(fv.defined);
+    let val = fv.value.unwrap();
+    assert_eq!(val.len(), 4);
+    assert_eq!(i32::from_le_bytes(val.try_into().unwrap()), -999);
+
+    // Old fill value with size=0 (defined but no value)
+    let empty = [0x00, 0x00, 0x00, 0x00];
+    let fv2 = FillValue::parse_old(&empty).unwrap();
+    assert!(fv2.defined);
+    assert!(fv2.value.is_none());
+}
+
 // ── Dense attributes ──
 
 #[test]
@@ -609,6 +633,137 @@ fn read_btree_v2_chunked() {
         .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
         .collect();
     let expected: Vec<i32> = (0..24).collect();
+    assert_eq!(values, expected);
+}
+
+// ── Hyperslab reads ──
+
+#[test]
+fn read_slice_contiguous_1d() {
+    let file = File::open(fixture("simple_contiguous_v2.h5")).unwrap();
+    let root = file.root_group().unwrap();
+    let ds = root.dataset("data").unwrap();
+
+    // Full dataset is [1.0, 2.0, 3.0, 4.0]; read middle two
+    let raw = ds.read_slice(&[1], &[2]).unwrap();
+    assert_eq!(raw.len(), 16); // 2 * 8 bytes (f64)
+
+    let values: Vec<f64> = raw
+        .chunks_exact(8)
+        .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert_eq!(values, vec![2.0, 3.0]);
+}
+
+#[test]
+fn read_slice_chunked_2d() {
+    // edge_chunks.h5: 7x5 i32 with values 0..34
+    let file = File::open(fixture("edge_chunks.h5")).unwrap();
+    let root = file.root_group().unwrap();
+    let ds = root.dataset("edge").unwrap();
+
+    // Read a 2x3 sub-region starting at (1, 1)
+    let raw = ds.read_slice(&[1, 1], &[2, 3]).unwrap();
+    assert_eq!(raw.len(), 24); // 2 * 3 * 4 bytes
+
+    let values: Vec<i32> = raw
+        .chunks_exact(4)
+        .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    // row 1 cols 1..4: [6, 7, 8], row 2 cols 1..4: [11, 12, 13]
+    assert_eq!(values, vec![6, 7, 8, 11, 12, 13]);
+}
+
+#[test]
+fn read_slice_compact() {
+    let file = File::open(fixture("compact_v2.h5")).unwrap();
+    let root = file.root_group().unwrap();
+    let ds = root.dataset("small").unwrap();
+
+    // Full dataset is [100, 200, 300, 400]; read last two
+    let raw = ds.read_slice(&[2], &[2]).unwrap();
+    assert_eq!(raw.len(), 4); // 2 * 2 bytes (i16)
+
+    let values: Vec<i16> = raw
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert_eq!(values, vec![300, 400]);
+}
+
+// ── Type conversion (byte order) ──
+
+#[test]
+fn read_native_big_endian() {
+    let file = File::open(fixture("big_endian.h5")).unwrap();
+    let root = file.root_group().unwrap();
+    let ds = root.dataset("be_data").unwrap();
+
+    // read_raw returns big-endian bytes
+    let raw = ds.read_raw().unwrap();
+    let be_first = i32::from_be_bytes(raw[..4].try_into().unwrap());
+    assert_eq!(be_first, 1);
+
+    // read_native should byte-swap to native (little-endian on this platform)
+    let native = ds.read_native().unwrap();
+    let values: Vec<i32> = native
+        .chunks_exact(4)
+        .map(|c| i32::from_ne_bytes(c.try_into().unwrap()))
+        .collect();
+    assert_eq!(values, vec![1, 256, 65536, -1, 1000000, 0]);
+}
+
+// ── Committed (shared) datatypes ──
+
+#[test]
+fn read_committed_datatype() {
+    let file = File::open(fixture("committed_datatype.h5")).unwrap();
+    let root = file.root_group().unwrap();
+
+    // Both datasets share a committed i32 type
+    let ds1 = root.dataset("data1").unwrap();
+    let dt1 = ds1.datatype().unwrap();
+    assert!(
+        matches!(dt1, Datatype::FixedPoint { size: 4, .. }),
+        "expected i32, got {:?}",
+        dt1
+    );
+
+    let raw1 = ds1.read_raw().unwrap();
+    let vals1: Vec<i32> = raw1
+        .chunks_exact(4)
+        .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert_eq!(vals1, vec![10, 20, 30, 40, 50]);
+
+    let ds2 = root.dataset("data2").unwrap();
+    let raw2 = ds2.read_raw().unwrap();
+    let vals2: Vec<i32> = raw2
+        .chunks_exact(4)
+        .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert_eq!(vals2, vec![100, 200, 300, 400, 500]);
+}
+
+// ── Extensible array with data blocks ──
+
+#[test]
+fn read_ea_large_dataset() {
+    let file = File::open(fixture("ea_large.h5")).unwrap();
+    let root = file.root_group().unwrap();
+    let ds = root.dataset("large_ea").unwrap();
+
+    assert_eq!(ds.shape().unwrap(), vec![100]);
+
+    let raw = ds.read_raw().unwrap();
+    assert_eq!(raw.len(), 400); // 100 * 4 bytes
+
+    let values: Vec<i32> = raw
+        .chunks_exact(4)
+        .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+
+    let expected: Vec<i32> = (0..100).map(|i| i * 10).collect();
     assert_eq!(values, expected);
 }
 

@@ -24,8 +24,8 @@ Pure Rust HDF5 reader targeting superblock v2 and v3 files. WASM-compatible.
   - [x] Object Header Continuation (0x0010)
   - [x] Fill Value (0x0005): version, space/write times, defined flag, value
   - [x] Attribute Info (0x0015): dense attribute storage via fractal heap
-  - [ ] Group Info (0x000A)
-  - [ ] Fill Value Old (0x0004)
+  - [x] Group Info (0x000A)
+  - [x] Fill Value Old (0x0004)
 
 ## Phase 3: B-tree v2
 - [x] B-tree v2 header parsing (magic `BTHD`, version, type, node/record size, depth, root addr)
@@ -45,7 +45,7 @@ Pure Rust HDF5 reader targeting superblock v2 and v3 files. WASM-compatible.
 - [x] Managed object lookup from heap ID
 - [x] Tiny object decoding (inline in heap ID)
 - [x] Row/column calculations for block addressing
-- [ ] Huge object reading (B-tree v2 lookup)
+- [x] Huge object reading (B-tree v2 lookup)
 - [ ] Filtered direct block handling
 
 ## Phase 4b: Global Heap
@@ -72,12 +72,12 @@ Pure Rust HDF5 reader targeting superblock v2 and v3 files. WASM-compatible.
 - [x] Compact layout: read raw bytes from object header
 - [x] Chunked layout with B-tree v1 index (layout v3)
 - [x] Chunked layout with B-tree v2 index
-- [x] Chunked layout with extensible array index
+- [x] Chunked layout with extensible array index (including data blocks + super blocks)
 - [x] Chunked layout with fixed array index
 - [x] Single chunk optimization
 - [x] Filter pipeline application on chunked read
-- [ ] Hyperslab / partial reads
-- [ ] Type conversion on read (endian swap, widening)
+- [x] Hyperslab / partial reads (`read_slice`)
+- [x] Type conversion on read (endian swap via `read_native`)
 
 ## Phase 7: Filter Pipeline
 - [x] Pipeline framework (ordered filter application)
@@ -86,7 +86,8 @@ Pure Rust HDF5 reader targeting superblock v2 and v3 files. WASM-compatible.
 - [x] Fletcher32 checksum verification
 - [ ] N-bit filter
 - [ ] Scale-offset filter
-- [ ] SZIP decompression (Rice coding)
+- [-] SZIP decompression — **won't implement**. HDF5's SZIP format is not standard CCSDS 121.0;
+      no pure Rust decoder exists. Would require native libaec FFI, breaking WASM compatibility.
 
 ## Phase 8: Navigation / Public API
 - [x] `File::open()` — from filesystem path
@@ -100,7 +101,8 @@ Pure Rust HDF5 reader targeting superblock v2 and v3 files. WASM-compatible.
 - [x] `File::open_path("/group1/subgroup/dataset")`
 - [x] `Dataset::read_vlen()` — read variable-length dataset elements
 - [x] `Dataset::read_vlen_strings()` — read vlen strings as `Vec<String>`
-- [ ] `Dataset::read_slice()` — read hyperslab
+- [x] `Dataset::read_slice()` — read hyperslab
+- [x] Shared/committed datatype resolution (shared message records v1/v2/v3)
 
 ## Phase 9: WASM & Portability
 - [x] `ReadAt` impl for `&[u8]` / `Vec<u8>` (in-memory buffer)
@@ -120,6 +122,10 @@ Pure Rust HDF5 reader targeting superblock v2 and v3 files. WASM-compatible.
 - [x] Fill value fixture + integration test
 - [x] Dense attributes fixture + integration test
 - [x] B-tree v2 chunk index fixture + integration test
+- [x] Big-endian fixture + integration test (type conversion)
+- [x] Hyperslab read integration tests (contiguous, compact, chunked)
+- [x] Committed datatype fixture + integration test
+- [x] Extensible array data blocks fixture + integration test (25 chunks)
 - [ ] Large file (>4GB) fixture
 - [ ] SWMR file fixture (superblock v3 specific)
 - [ ] Fuzz testing on malformed inputs

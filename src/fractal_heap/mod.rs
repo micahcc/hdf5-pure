@@ -256,15 +256,85 @@ pub fn read_managed_object<R: ReadAt + ?Sized>(
     match id_type {
         0 => read_managed_object_inner(reader, header, heap_id, size_of_offsets, size_of_lengths),
         1 => read_tiny_object(header, heap_id),
-        2 => {
-            // Huge object — stored separately, pointed to by B-tree v2
-            Err(Error::InvalidFractalHeap {
-                msg: "huge object reading not yet implemented".into(),
-            })
-        }
+        2 => read_huge_object(reader, header, heap_id, size_of_offsets, size_of_lengths),
         _ => Err(Error::InvalidFractalHeap {
             msg: format!("unknown heap ID type {}", id_type),
         }),
+    }
+}
+
+fn read_huge_object<R: ReadAt + ?Sized>(
+    reader: &R,
+    header: &FractalHeapHeader,
+    heap_id: &[u8],
+    size_of_offsets: u8,
+    size_of_lengths: u8,
+) -> Result<Vec<u8>> {
+    let directly_accessed = (header.flags & 0x02) != 0;
+    let o = size_of_offsets as usize;
+    let l = size_of_lengths as usize;
+
+    if directly_accessed {
+        // Heap ID directly encodes address + length
+        if heap_id.len() < 1 + o + l {
+            return Err(Error::InvalidFractalHeap {
+                msg: "huge object heap ID too short for direct access".into(),
+            });
+        }
+        let address = read_var_le(&heap_id[1..], o);
+        let length = read_var_le(&heap_id[1 + o..], l);
+
+        let mut data = vec![0u8; length as usize];
+        reader.read_exact_at(address, &mut data).map_err(Error::Io)?;
+        Ok(data)
+    } else {
+        // Indirectly accessed: heap ID contains a unique ID, look up in B-tree v2
+        let id_bytes = (header.heap_id_length as usize).saturating_sub(1);
+        if heap_id.len() < 1 + id_bytes {
+            return Err(Error::InvalidFractalHeap {
+                msg: "huge object heap ID too short for indirect access".into(),
+            });
+        }
+        let obj_id = read_var_le(&heap_id[1..], id_bytes);
+
+        if header.huge_bt2_address == u64::MAX {
+            return Err(Error::InvalidFractalHeap {
+                msg: "huge B-tree v2 address is undefined".into(),
+            });
+        }
+
+        let bt2 = crate::btree2::BTree2Header::parse(
+            reader,
+            header.huge_bt2_address,
+            size_of_offsets,
+            size_of_lengths,
+        )?;
+
+        // Search B-tree for matching ID
+        // Type 2 record: address(O) + length(L) + id(L)
+        let mut found: Option<(u64, u64)> = None;
+        crate::btree2::iterate_records(reader, &bt2, size_of_offsets, |record| {
+            if record.data.len() >= o + l + l {
+                let addr = read_var_le(&record.data, o);
+                let len = read_var_le(&record.data[o..], l);
+                let id = read_var_le(&record.data[o + l..], l);
+                if id == obj_id {
+                    found = Some((addr, len));
+                }
+            }
+            Ok(())
+        })?;
+
+        match found {
+            Some((address, length)) => {
+                let mut data = vec![0u8; length as usize];
+                reader.read_exact_at(address, &mut data).map_err(Error::Io)?;
+                Ok(data)
+            }
+            None => Err(Error::InvalidFractalHeap {
+                msg: format!("huge object ID {} not found in B-tree", obj_id),
+            }),
+        }
     }
 }
 
