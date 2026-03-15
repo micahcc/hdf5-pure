@@ -1177,3 +1177,49 @@ fn read_compound_complex_members_data() {
     assert_eq!(i32::from_le_bytes(r[4..8].try_into().unwrap()), 70);
     assert_eq!(i32::from_le_bytes(r[16..20].try_into().unwrap()), 300);
 }
+
+// ── SWMR (superblock v3 specific) ──
+
+#[test]
+fn read_swmr_superblock() {
+    let data = std::fs::read(fixture("swmr.h5")).unwrap();
+    let sb = hdf5_reader::Superblock::parse(data.as_slice(), 0).unwrap();
+    assert_eq!(sb.version, 3);
+    assert_eq!(sb.size_of_offsets, 8);
+    assert_eq!(sb.size_of_lengths, 8);
+    // File was cleanly closed, so SWMR flag should be clear
+    assert!(!sb.swmr_write_in_progress());
+}
+
+#[test]
+fn read_swmr_extended_dataset() {
+    let file = File::open(fixture("swmr.h5")).unwrap();
+    let root = file.root_group().unwrap();
+    let ds = root.dataset("data").unwrap();
+
+    // Dataset was created with 4 elements, then extended to 8 during SWMR write
+    let shape = ds.shape().unwrap();
+    assert_eq!(shape, vec![8]);
+
+    let raw = ds.read_raw().unwrap();
+    assert_eq!(raw.len(), 32); // 8 * 4 bytes
+
+    let values: Vec<i32> = raw
+        .chunks_exact(4)
+        .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert_eq!(values, vec![10, 20, 30, 40, 50, 60, 70, 80]);
+}
+
+#[test]
+fn read_swmr_attribute() {
+    let file = File::open(fixture("swmr.h5")).unwrap();
+    let root = file.root_group().unwrap();
+    let ds = root.dataset("data").unwrap();
+
+    let attrs = ds.attributes().unwrap();
+    assert_eq!(attrs.len(), 1);
+    assert_eq!(attrs[0].name, "scale");
+    let val = i32::from_le_bytes(attrs[0].raw_value[0..4].try_into().unwrap());
+    assert_eq!(val, 100);
+}

@@ -162,5 +162,5 @@ Sources in
 - [x] Shared attribute type fixture + integration test
 - [x] Empty/unallocated chunked dataset fixture + integration test
 - [ ] Large file (>4GB) fixture
-- [ ] SWMR file fixture (superblock v3 specific)
+- [x] SWMR file fixture (superblock v3 specific)
 - [ ] Fuzz testing on malformed inputs
