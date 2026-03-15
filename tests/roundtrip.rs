@@ -912,7 +912,10 @@ fn write_vlen_strings() {
     assert_eq!(ds.shape().unwrap(), vec![4]);
 
     let read_strings = ds.read_vlen_strings().unwrap();
-    assert_eq!(read_strings, vec!["hello", "world", "HDF5", "variable-length"]);
+    assert_eq!(
+        read_strings,
+        vec!["hello", "world", "HDF5", "variable-length"]
+    );
 }
 
 // ── vlen_sequence ──
@@ -920,8 +923,14 @@ fn write_vlen_strings() {
 #[test]
 fn write_vlen_sequence() {
     let mut w = FileWriter::new();
-    let seq0: Vec<u8> = vec![10i32, 20].iter().flat_map(|v| v.to_le_bytes()).collect();
-    let seq1: Vec<u8> = vec![100i32, 200, 300, 400].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let seq0: Vec<u8> = vec![10i32, 20]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let seq1: Vec<u8> = vec![100i32, 200, 300, 400]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
     let seq2: Vec<u8> = vec![42i32].iter().flat_map(|v| v.to_le_bytes()).collect();
     let elements = vec![seq0, seq1, seq2];
     w.root_mut().add_vlen_dataset(
@@ -940,10 +949,19 @@ fn write_vlen_sequence() {
     let vlen_data = ds.read_vlen().unwrap();
     assert_eq!(vlen_data.len(), 3);
 
-    let s0: Vec<i32> = vlen_data[0].chunks_exact(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect();
+    let s0: Vec<i32> = vlen_data[0]
+        .chunks_exact(4)
+        .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
     assert_eq!(s0, vec![10, 20]);
-    let s1: Vec<i32> = vlen_data[1].chunks_exact(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect();
+    let s1: Vec<i32> = vlen_data[1]
+        .chunks_exact(4)
+        .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
     assert_eq!(s1, vec![100, 200, 300, 400]);
-    let s2: Vec<i32> = vlen_data[2].chunks_exact(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect();
+    let s2: Vec<i32> = vlen_data[2]
+        .chunks_exact(4)
+        .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
     assert_eq!(s2, vec![42]);
 }

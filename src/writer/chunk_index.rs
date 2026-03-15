@@ -1,9 +1,9 @@
 use crate::checksum;
 use crate::error::Result;
 use crate::superblock::UNDEF_ADDR;
-
 use crate::writer::chunk_util::enumerate_chunks;
-use crate::writer::encode::{SIZE_OF_OFFSETS, limit_enc_size_u64};
+use crate::writer::encode::SIZE_OF_OFFSETS;
+use crate::writer::encode::limit_enc_size_u64;
 
 /// Write a variable-length little-endian integer.
 fn write_var_le(buf: &mut Vec<u8>, value: u64, nbytes: usize) {

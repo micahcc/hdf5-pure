@@ -1,8 +1,10 @@
-use crate::error::{Error, Result};
-
-use crate::writer::encode::{encode_superblock, SUPERBLOCK_SIZE};
-use crate::writer::serialize::write_group;
+use crate::error::Error;
+use crate::error::Result;
 use crate::writer::GroupNode;
+use crate::writer::encode::SUPERBLOCK_SIZE;
+use crate::writer::encode::encode_superblock;
+use crate::writer::serialize::write_group;
+use crate::writer::serialize_compat::write_tree_compat;
 
 /// Options controlling how the HDF5 file is written.
 #[derive(Debug, Clone, Default)]
@@ -10,6 +12,16 @@ pub struct WriteOptions {
     /// If set, store these timestamps on every object header.
     /// Tuple: (access_time, modification_time, change_time, birth_time) as Unix seconds.
     pub timestamps: Option<(u32, u32, u32, u32)>,
+
+    /// When true, produce output byte-compatible with the HDF5 C library.
+    ///
+    /// This affects: message ordering, per-message flags, OHDR chunk padding,
+    /// fill-value defaults, attribute-info messages, metadata block alignment,
+    /// and parent-first object ordering.
+    pub hdf5lib_compat: bool,
+
+    /// Metadata block size (used in compat mode). Default is 2048.
+    pub meta_block_size: Option<usize>,
 }
 
 /// Builds an HDF5 file in memory and writes it out.
@@ -51,11 +63,22 @@ impl FileWriter {
 
     /// Serialize the entire file to a byte vector.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        if self.options.hdf5lib_compat {
+            return self.to_bytes_compat();
+        }
+
         let mut buf = vec![0u8; SUPERBLOCK_SIZE];
         let root_addr = write_group(&self.root, &mut buf, &self.options)?;
         let eof = buf.len() as u64;
         let sb = encode_superblock(root_addr, eof);
         buf[..SUPERBLOCK_SIZE].copy_from_slice(&sb);
+        Ok(buf)
+    }
+
+    /// Compat-mode serialization: parent-first ordering, metadata block alignment.
+    fn to_bytes_compat(&self) -> Result<Vec<u8>> {
+        let meta_block_size = self.options.meta_block_size.unwrap_or(2048);
+        let buf = write_tree_compat(&self.root, &self.options, meta_block_size)?;
         Ok(buf)
     }
 

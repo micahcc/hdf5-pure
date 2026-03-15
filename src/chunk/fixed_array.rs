@@ -1,11 +1,11 @@
 use crate::checksum;
+use crate::chunk::entry::ChunkEntry;
+use crate::chunk::helpers::linear_to_scaled;
+use crate::chunk::helpers::read_var_le;
 use crate::error::Error;
 use crate::error::Result;
 use crate::io::Le;
 use crate::io::ReadAt;
-
-use crate::chunk::entry::ChunkEntry;
-use crate::chunk::helpers::{linear_to_scaled, read_var_le};
 
 /// Fixed Array header magic: `FAHD`
 const FAHD_MAGIC: [u8; 4] = *b"FAHD";

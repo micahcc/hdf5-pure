@@ -1,4 +1,5 @@
-use crate::error::{Error, Result};
+use crate::error::Error;
+use crate::error::Result;
 
 const NBIT_ATOMIC: u32 = 1;
 const NBIT_ARRAY: u32 = 2;

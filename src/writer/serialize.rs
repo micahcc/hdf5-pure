@@ -1,23 +1,37 @@
-use crate::error::{Error, Result};
+use crate::error::Error;
+use crate::error::Result;
 use crate::object_header::messages::MessageType;
 use crate::superblock::UNDEF_ADDR;
-
-use crate::writer::chunk_index::{
-    write_btree_v1_chunk_index, write_btree_v2_chunk_index, write_extensible_array_index,
-    write_fixed_array_index,
-};
-use crate::writer::chunk_util::{compute_chunk_count, enumerate_chunks, extract_chunk_data};
+use crate::writer::chunk_index::write_btree_v1_chunk_index;
+use crate::writer::chunk_index::write_btree_v2_chunk_index;
+use crate::writer::chunk_index::write_extensible_array_index;
+use crate::writer::chunk_index::write_fixed_array_index;
+use crate::writer::chunk_util::compute_chunk_count;
+use crate::writer::chunk_util::enumerate_chunks;
+use crate::writer::chunk_util::extract_chunk_data;
 use crate::writer::dataset_node::DatasetNode;
-use crate::writer::encode::{
-    SIZE_OF_OFFSETS, encode_attribute, encode_chunked_layout, encode_compact_layout,
-    encode_contiguous_layout, encode_dataspace, encode_datatype, encode_fill_value_msg,
-    encode_filter_pipeline, encode_group_info, encode_link, encode_link_info,
-    encode_object_header, ohdr_overhead,
-};
+use crate::writer::encode::OhdrMsg;
+use crate::writer::encode::SIZE_OF_OFFSETS;
+use crate::writer::encode::encode_attribute;
+use crate::writer::encode::encode_attribute_info;
+use crate::writer::encode::encode_chunked_layout;
+use crate::writer::encode::encode_compact_layout;
+use crate::writer::encode::encode_contiguous_layout;
+use crate::writer::encode::encode_dataspace;
+use crate::writer::encode::encode_datatype;
+use crate::writer::encode::encode_fill_value_msg;
+use crate::writer::encode::encode_filter_pipeline;
+use crate::writer::encode::encode_group_info;
+use crate::writer::encode::encode_link;
+use crate::writer::encode::encode_link_info;
+use crate::writer::encode::encode_object_header;
+use crate::writer::encode::ohdr_overhead;
 use crate::writer::file_writer::WriteOptions;
-use crate::writer::gcol::{build_global_heap_collection, build_vlen_heap_ids};
+use crate::writer::gcol::build_global_heap_collection;
+use crate::writer::gcol::build_vlen_heap_ids;
 use crate::writer::group_node::GroupNode;
-use crate::writer::types::{ChildNode, StorageLayout};
+use crate::writer::types::ChildNode;
+use crate::writer::types::StorageLayout;
 use crate::writer::write_filters::apply_filters_forward;
 
 pub(crate) fn write_group(
@@ -36,17 +50,22 @@ pub(crate) fn write_group(
 
     let ohdr_addr = buf.len() as u64;
 
-    let mut messages: Vec<(u8, Vec<u8>)> = Vec::new();
-    messages.push((MessageType::LinkInfo.as_u8(), encode_link_info()));
-    messages.push((MessageType::GroupInfo.as_u8(), encode_group_info()));
+    let mut messages: Vec<OhdrMsg> = Vec::new();
+    messages.push((MessageType::LinkInfo.as_u8(), encode_link_info(), 0));
+    let group_info_flags: u8 = if opts.hdf5lib_compat { 0x01 } else { 0x00 };
+    messages.push((
+        MessageType::GroupInfo.as_u8(),
+        encode_group_info(),
+        group_info_flags,
+    ));
     for (name, addr) in &child_addrs {
-        messages.push((MessageType::Link.as_u8(), encode_link(name, *addr)));
+        messages.push((MessageType::Link.as_u8(), encode_link(name, *addr), 0));
     }
     for attr in &group.attributes {
-        messages.push((MessageType::Attribute.as_u8(), encode_attribute(attr)?));
+        messages.push((MessageType::Attribute.as_u8(), encode_attribute(attr)?, 0));
     }
 
-    let ohdr = encode_object_header(&messages, opts)?;
+    let ohdr = encode_object_header(&messages, opts, None)?;
     buf.extend_from_slice(&ohdr);
 
     Ok(ohdr_addr)
@@ -56,23 +75,41 @@ fn write_dataset(ds: &DatasetNode, buf: &mut Vec<u8>, opts: &WriteOptions) -> Re
     validate_dataset(ds)?;
 
     let ohdr_addr = buf.len() as u64;
+    let compat = opts.hdf5lib_compat;
 
     match ds.layout {
         StorageLayout::Contiguous => {
             let dt_body = encode_datatype(&ds.datatype)?;
-            let ds_body = encode_dataspace(&ds.shape, ds.max_dims.as_deref());
-            let fv_body = encode_fill_value_msg(&ds.fill_value);
+
+            // In compat mode, always include max_dims (set to current dims if not specified)
+            let effective_max_dims: Option<Vec<u64>> = if compat {
+                Some(ds.max_dims.clone().unwrap_or_else(|| ds.shape.clone()))
+            } else {
+                ds.max_dims.clone()
+            };
+            let ds_body = encode_dataspace(&ds.shape, effective_max_dims.as_deref());
+
+            let fv_body = encode_fill_value_msg(&ds.fill_value, compat);
             let attr_bodies: Vec<Vec<u8>> = ds
                 .attributes
                 .iter()
                 .map(encode_attribute)
                 .collect::<Result<Vec<_>>>()?;
+
+            // Message flags
+            let dt_flags: u8 = if compat { 0x01 } else { 0x00 };
+            let fv_flags: u8 = if compat { 0x01 } else { 0x00 };
+
             let layout_body_size = 18usize;
+
+            // Compute total message size for OHDR overhead calculation
+            let attr_info_size = if compat { 4 + 18 } else { 0 };
             let total_msg_size: usize = [&dt_body, &ds_body, &fv_body]
                 .iter()
                 .map(|b| 4 + b.len())
                 .sum::<usize>()
                 + (4 + layout_body_size)
+                + attr_info_size
                 + attr_bodies.iter().map(|b| 4 + b.len()).sum::<usize>();
             let ohdr_size = ohdr_overhead(total_msg_size, opts);
 
@@ -82,23 +119,22 @@ fn write_dataset(ds: &DatasetNode, buf: &mut Vec<u8>, opts: &WriteOptions) -> Re
                 let heap_id_data_addr = gcol_addr + gcol_bytes.len() as u64;
                 let heap_id_data = build_vlen_heap_ids(vlen_elems, gcol_addr);
 
-                let layout_body = encode_contiguous_layout(
-                    heap_id_data_addr,
-                    heap_id_data.len() as u64,
-                );
+                let layout_body =
+                    encode_contiguous_layout(heap_id_data_addr, heap_id_data.len() as u64);
                 debug_assert_eq!(layout_body.len(), layout_body_size);
 
-                let mut messages: Vec<(u8, Vec<u8>)> = vec![
-                    (MessageType::Datatype.as_u8(), dt_body),
-                    (MessageType::Dataspace.as_u8(), ds_body),
-                    (MessageType::FillValue.as_u8(), fv_body),
-                    (MessageType::DataLayout.as_u8(), layout_body),
-                ];
-                for body in attr_bodies {
-                    messages.push((MessageType::Attribute.as_u8(), body));
-                }
+                let messages = build_dataset_messages(
+                    dt_body,
+                    ds_body,
+                    fv_body,
+                    layout_body,
+                    &attr_bodies,
+                    dt_flags,
+                    fv_flags,
+                    compat,
+                )?;
 
-                let ohdr = encode_object_header(&messages, opts)?;
+                let ohdr = encode_object_header(&messages, opts, None)?;
                 debug_assert_eq!(ohdr.len(), ohdr_size);
 
                 buf.extend_from_slice(&ohdr);
@@ -114,17 +150,18 @@ fn write_dataset(ds: &DatasetNode, buf: &mut Vec<u8>, opts: &WriteOptions) -> Re
                 let layout_body = encode_contiguous_layout(data_addr, ds.data.len() as u64);
                 debug_assert_eq!(layout_body.len(), layout_body_size);
 
-                let mut messages: Vec<(u8, Vec<u8>)> = vec![
-                    (MessageType::Datatype.as_u8(), dt_body),
-                    (MessageType::Dataspace.as_u8(), ds_body),
-                    (MessageType::FillValue.as_u8(), fv_body),
-                    (MessageType::DataLayout.as_u8(), layout_body),
-                ];
-                for body in attr_bodies {
-                    messages.push((MessageType::Attribute.as_u8(), body));
-                }
+                let messages = build_dataset_messages(
+                    dt_body,
+                    ds_body,
+                    fv_body,
+                    layout_body,
+                    &attr_bodies,
+                    dt_flags,
+                    fv_flags,
+                    compat,
+                )?;
 
-                let ohdr = encode_object_header(&messages, opts)?;
+                let ohdr = encode_object_header(&messages, opts, None)?;
                 debug_assert_eq!(ohdr.len(), ohdr_size);
 
                 buf.extend_from_slice(&ohdr);
@@ -134,7 +171,7 @@ fn write_dataset(ds: &DatasetNode, buf: &mut Vec<u8>, opts: &WriteOptions) -> Re
         StorageLayout::Compact => {
             let dt_body = encode_datatype(&ds.datatype)?;
             let ds_body = encode_dataspace(&ds.shape, ds.max_dims.as_deref());
-            let fv_body = encode_fill_value_msg(&ds.fill_value);
+            let fv_body = encode_fill_value_msg(&ds.fill_value, compat);
             let attr_bodies: Vec<Vec<u8>> = ds
                 .attributes
                 .iter()
@@ -142,17 +179,21 @@ fn write_dataset(ds: &DatasetNode, buf: &mut Vec<u8>, opts: &WriteOptions) -> Re
                 .collect::<Result<Vec<_>>>()?;
             let layout_body = encode_compact_layout(&ds.data);
 
-            let mut messages: Vec<(u8, Vec<u8>)> = vec![
-                (MessageType::Datatype.as_u8(), dt_body),
-                (MessageType::Dataspace.as_u8(), ds_body),
-                (MessageType::FillValue.as_u8(), fv_body),
-                (MessageType::DataLayout.as_u8(), layout_body),
-            ];
-            for body in attr_bodies {
-                messages.push((MessageType::Attribute.as_u8(), body));
-            }
+            let dt_flags: u8 = if compat { 0x01 } else { 0x00 };
+            let fv_flags: u8 = if compat { 0x01 } else { 0x00 };
 
-            let ohdr = encode_object_header(&messages, opts)?;
+            let messages = build_dataset_messages(
+                dt_body,
+                ds_body,
+                fv_body,
+                layout_body,
+                &attr_bodies,
+                dt_flags,
+                fv_flags,
+                compat,
+            )?;
+
+            let ohdr = encode_object_header(&messages, opts, None)?;
             buf.extend_from_slice(&ohdr);
         }
         StorageLayout::Chunked {
@@ -162,7 +203,7 @@ fn write_dataset(ds: &DatasetNode, buf: &mut Vec<u8>, opts: &WriteOptions) -> Re
             let element_size = ds.datatype.element_size();
             let dt_body = encode_datatype(&ds.datatype)?;
             let ds_body = encode_dataspace(&ds.shape, ds.max_dims.as_deref());
-            let fv_body = encode_fill_value_msg(&ds.fill_value);
+            let fv_body = encode_fill_value_msg(&ds.fill_value, compat);
             let attr_bodies: Vec<Vec<u8>> = ds
                 .attributes
                 .iter()
@@ -179,7 +220,11 @@ fn write_dataset(ds: &DatasetNode, buf: &mut Vec<u8>, opts: &WriteOptions) -> Re
             let mut chunk_data_parts: Vec<Vec<u8>> = Vec::new();
             for coords in &chunk_coords_list {
                 let mut chunk = extract_chunk_data(
-                    &ds.data, &ds.shape, chunk_dims, coords, element_size as usize,
+                    &ds.data,
+                    &ds.shape,
+                    chunk_dims,
+                    coords,
+                    element_size as usize,
                 );
                 if has_filters {
                     chunk = apply_filters_forward(filters, chunk, element_size)?;
@@ -222,20 +267,20 @@ fn write_dataset(ds: &DatasetNode, buf: &mut Vec<u8>, opts: &WriteOptions) -> Re
             layout_body.extend_from_slice(&element_size.to_le_bytes());
             debug_assert_eq!(layout_body.len(), layout_body_size);
 
-            let mut messages: Vec<(u8, Vec<u8>)> = vec![
-                (MessageType::Datatype.as_u8(), dt_body),
-                (MessageType::Dataspace.as_u8(), ds_body),
-                (MessageType::FillValue.as_u8(), fv_body),
+            let mut messages: Vec<OhdrMsg> = vec![
+                (MessageType::Datatype.as_u8(), dt_body, 0),
+                (MessageType::Dataspace.as_u8(), ds_body, 0),
+                (MessageType::FillValue.as_u8(), fv_body, 0),
             ];
             if let Some(fb) = filter_body {
-                messages.push((MessageType::FilterPipeline.as_u8(), fb));
+                messages.push((MessageType::FilterPipeline.as_u8(), fb, 0));
             }
-            messages.push((MessageType::DataLayout.as_u8(), layout_body));
+            messages.push((MessageType::DataLayout.as_u8(), layout_body, 0));
             for body in attr_bodies {
-                messages.push((MessageType::Attribute.as_u8(), body));
+                messages.push((MessageType::Attribute.as_u8(), body, 0));
             }
 
-            let ohdr = encode_object_header(&messages, opts)?;
+            let ohdr = encode_object_header(&messages, opts, None)?;
             debug_assert_eq!(ohdr.len(), ohdr_size);
             buf.extend_from_slice(&ohdr);
 
@@ -260,7 +305,7 @@ fn write_dataset(ds: &DatasetNode, buf: &mut Vec<u8>, opts: &WriteOptions) -> Re
             let element_size = ds.datatype.element_size();
             let dt_body = encode_datatype(&ds.datatype)?;
             let ds_body = encode_dataspace(&ds.shape, ds.max_dims.as_deref());
-            let fv_body = encode_fill_value_msg(&ds.fill_value);
+            let fv_body = encode_fill_value_msg(&ds.fill_value, compat);
             let attr_bodies: Vec<Vec<u8>> = ds
                 .attributes
                 .iter()
@@ -365,20 +410,20 @@ fn write_dataset(ds: &DatasetNode, buf: &mut Vec<u8>, opts: &WriteOptions) -> Re
             );
             debug_assert_eq!(layout_body.len(), layout_body_size);
 
-            let mut messages: Vec<(u8, Vec<u8>)> = vec![
-                (MessageType::Datatype.as_u8(), dt_body),
-                (MessageType::Dataspace.as_u8(), ds_body),
-                (MessageType::FillValue.as_u8(), fv_body),
+            let mut messages: Vec<OhdrMsg> = vec![
+                (MessageType::Datatype.as_u8(), dt_body, 0),
+                (MessageType::Dataspace.as_u8(), ds_body, 0),
+                (MessageType::FillValue.as_u8(), fv_body, 0),
             ];
             if let Some(fb) = filter_body {
-                messages.push((MessageType::FilterPipeline.as_u8(), fb));
+                messages.push((MessageType::FilterPipeline.as_u8(), fb, 0));
             }
-            messages.push((MessageType::DataLayout.as_u8(), layout_body));
+            messages.push((MessageType::DataLayout.as_u8(), layout_body, 0));
             for body in attr_bodies {
-                messages.push((MessageType::Attribute.as_u8(), body));
+                messages.push((MessageType::Attribute.as_u8(), body, 0));
             }
 
-            let ohdr = encode_object_header(&messages, opts)?;
+            let ohdr = encode_object_header(&messages, opts, None)?;
             debug_assert_eq!(ohdr.len(), ohdr_size);
             buf.extend_from_slice(&ohdr);
 
@@ -422,6 +467,46 @@ fn write_dataset(ds: &DatasetNode, buf: &mut Vec<u8>, opts: &WriteOptions) -> Re
     }
 
     Ok(ohdr_addr)
+}
+
+/// Build the dataset message list in the correct order.
+///
+/// In compat mode: Dataspace, Datatype, FillValue, DataLayout, AttributeInfo, Attributes.
+/// In normal mode: Datatype, Dataspace, FillValue, DataLayout, Attributes.
+fn build_dataset_messages(
+    dt_body: Vec<u8>,
+    ds_body: Vec<u8>,
+    fv_body: Vec<u8>,
+    layout_body: Vec<u8>,
+    attr_bodies: &[Vec<u8>],
+    dt_flags: u8,
+    fv_flags: u8,
+    compat: bool,
+) -> Result<Vec<OhdrMsg>> {
+    let mut messages: Vec<OhdrMsg> = if compat {
+        vec![
+            (MessageType::Dataspace.as_u8(), ds_body, 0),
+            (MessageType::Datatype.as_u8(), dt_body, dt_flags),
+            (MessageType::FillValue.as_u8(), fv_body, fv_flags),
+            (MessageType::DataLayout.as_u8(), layout_body, 0),
+            (
+                MessageType::AttributeInfo.as_u8(),
+                encode_attribute_info(),
+                0x04,
+            ),
+        ]
+    } else {
+        vec![
+            (MessageType::Datatype.as_u8(), dt_body, 0),
+            (MessageType::Dataspace.as_u8(), ds_body, 0),
+            (MessageType::FillValue.as_u8(), fv_body, 0),
+            (MessageType::DataLayout.as_u8(), layout_body, 0),
+        ]
+    };
+    for body in attr_bodies {
+        messages.push((MessageType::Attribute.as_u8(), body.clone(), 0));
+    }
+    Ok(messages)
 }
 
 fn validate_dataset(ds: &DatasetNode) -> Result<()> {

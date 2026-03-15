@@ -1,8 +1,13 @@
-use crate::error::{Error, Result};
-
+use crate::datatype::members::CompoundMember;
+use crate::datatype::members::EnumMember;
+use crate::datatype::primitives::ByteOrder;
+use crate::datatype::primitives::CharacterSet;
+use crate::datatype::primitives::DatatypeClass;
+use crate::datatype::primitives::ReferenceType;
+use crate::datatype::primitives::StringPadding;
 use crate::datatype::types::Datatype;
-use crate::datatype::members::{CompoundMember, EnumMember};
-use crate::datatype::primitives::{ByteOrder, CharacterSet, DatatypeClass, ReferenceType, StringPadding};
+use crate::error::Error;
+use crate::error::Result;
 
 impl Datatype {
     /// Parse a datatype message from raw bytes.

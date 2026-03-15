@@ -1,4 +1,5 @@
-use super::helpers::{copy_chunk_to_output, linear_to_scaled};
+use super::helpers::copy_chunk_to_output;
+use super::helpers::linear_to_scaled;
 use super::implicit::read_implicit_chunk_entries;
 use super::single_chunk::read_single_chunk_entries;
 

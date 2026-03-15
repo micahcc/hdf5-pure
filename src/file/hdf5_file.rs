@@ -1,13 +1,12 @@
 use crate::error::Error;
 use crate::error::Result;
+use crate::file::group::Group;
+use crate::file::helpers::read_offset_from_slice;
+use crate::file::node::Node;
 use crate::io::ReadAt;
 use crate::object_header::ObjectHeader;
 use crate::object_header::messages::MessageType;
 use crate::superblock::Superblock;
-
-use crate::file::group::Group;
-use crate::file::helpers::read_offset_from_slice;
-use crate::file::node::Node;
 
 /// An opened HDF5 file.
 ///

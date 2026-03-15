@@ -4,14 +4,13 @@ use crate::dataspace::Dataspace;
 use crate::datatype::Datatype;
 use crate::error::Error;
 use crate::error::Result;
+use crate::file::hdf5_file::File;
+use crate::file::helpers::read_offset_from_slice;
 use crate::fractal_heap::FractalHeapHeader;
 use crate::fractal_heap::{self};
 use crate::io::ReadAt;
 use crate::object_header::ObjectHeader;
 use crate::object_header::messages::MessageType;
-
-use crate::file::hdf5_file::File;
-use crate::file::helpers::read_offset_from_slice;
 
 /// An attribute (name + value) on a group or dataset.
 #[derive(Debug, Clone)]

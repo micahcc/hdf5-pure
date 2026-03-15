@@ -1,9 +1,8 @@
+use crate::chunk::entry::ChunkEntry;
 use crate::error::Error;
 use crate::error::Result;
 use crate::io::Le;
 use crate::io::ReadAt;
-
-use crate::chunk::entry::ChunkEntry;
 
 /// B-tree v1 signature: `TREE`
 const TREE_MAGIC: [u8; 4] = *b"TREE";

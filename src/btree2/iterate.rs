@@ -1,4 +1,5 @@
-use crate::btree2::header::{BTIN_MAGIC, BTLF_MAGIC};
+use crate::btree2::header::BTIN_MAGIC;
+use crate::btree2::header::BTLF_MAGIC;
 use crate::btree2::header::BTree2Header;
 use crate::btree2::record::Record;
 use crate::checksum;

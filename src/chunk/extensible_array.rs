@@ -1,10 +1,9 @@
+use crate::chunk::entry::ChunkEntry;
+use crate::chunk::helpers::linear_to_scaled;
 use crate::error::Error;
 use crate::error::Result;
 use crate::io::Le;
 use crate::io::ReadAt;
-
-use crate::chunk::entry::ChunkEntry;
-use crate::chunk::helpers::linear_to_scaled;
 
 /// Extensible Array header magic: `EAHD`
 const EAHD_MAGIC: [u8; 4] = *b"EAHD";

@@ -2,6 +2,12 @@ use crate::btree2::BTree2Header;
 use crate::btree2::{self};
 use crate::error::Error;
 use crate::error::Result;
+use crate::file::attribute::Attribute;
+use crate::file::attribute::parse_attributes;
+use crate::file::attribute::parse_attributes_by_creation_order;
+use crate::file::dataset::Dataset;
+use crate::file::hdf5_file::File;
+use crate::file::helpers::read_offset_from_slice;
 use crate::fractal_heap::FractalHeapHeader;
 use crate::fractal_heap::{self};
 use crate::io::ReadAt;
@@ -9,11 +15,6 @@ use crate::link::Link;
 use crate::link::LinkTarget;
 use crate::object_header::ObjectHeader;
 use crate::object_header::messages::MessageType;
-
-use crate::file::attribute::{Attribute, parse_attributes, parse_attributes_by_creation_order};
-use crate::file::dataset::Dataset;
-use crate::file::hdf5_file::File;
-use crate::file::helpers::read_offset_from_slice;
 
 /// A group (directory-like container) in the HDF5 file.
 pub struct Group<'a, R: ReadAt + ?Sized> {

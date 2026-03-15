@@ -2,15 +2,16 @@ use crate::dataspace::Dataspace;
 use crate::datatype::Datatype;
 use crate::error::Error;
 use crate::error::Result;
+use crate::file::attribute::Attribute;
+use crate::file::attribute::parse_attributes;
+use crate::file::attribute::parse_attributes_by_creation_order;
+use crate::file::fill_value::FillValue;
+use crate::file::hdf5_file::File;
 use crate::filters::FilterPipeline;
 use crate::io::ReadAt;
 use crate::layout::DataLayout;
 use crate::object_header::ObjectHeader;
 use crate::object_header::messages::MessageType;
-
-use crate::file::attribute::{Attribute, parse_attributes, parse_attributes_by_creation_order};
-use crate::file::hdf5_file::File;
-use crate::file::fill_value::FillValue;
 
 /// A dataset in the HDF5 file.
 pub struct Dataset<'a, R: ReadAt + ?Sized> {

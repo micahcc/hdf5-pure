@@ -1,6 +1,5 @@
 use crate::error::Error;
 use crate::error::Result;
-
 use crate::writer::types::ChunkFilter;
 
 /// Apply filters in forward direction (compression) to chunk data.

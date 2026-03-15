@@ -1,5 +1,7 @@
+use crate::datatype::primitives::ByteOrder;
+use crate::datatype::primitives::CharacterSet;
+use crate::datatype::primitives::StringPadding;
 use crate::datatype::types::Datatype;
-use crate::datatype::primitives::{ByteOrder, CharacterSet, StringPadding};
 
 impl Datatype {
     /// Create a native little-endian signed 8-bit integer type.

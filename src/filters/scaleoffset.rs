@@ -1,4 +1,5 @@
-use crate::error::{Error, Result};
+use crate::error::Error;
+use crate::error::Result;
 
 const SO_CLS_INTEGER: u32 = 0;
 const SO_CLS_FLOAT: u32 = 1;

@@ -1,5 +1,9 @@
-use crate::datatype::members::{CompoundMember, EnumMember};
-use crate::datatype::primitives::{ByteOrder, CharacterSet, ReferenceType, StringPadding};
+use crate::datatype::members::CompoundMember;
+use crate::datatype::members::EnumMember;
+use crate::datatype::primitives::ByteOrder;
+use crate::datatype::primitives::CharacterSet;
+use crate::datatype::primitives::ReferenceType;
+use crate::datatype::primitives::StringPadding;
 
 /// A decoded HDF5 datatype message.
 ///

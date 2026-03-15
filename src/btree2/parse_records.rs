@@ -13,10 +13,7 @@ pub fn parse_link_name_record(data: &[u8], heap_id_len: usize) -> Option<(u32, V
 /// Parse a B-tree v2 "type 6" record (link creation order for new-style groups).
 ///
 /// Layout: creation_order (8 bytes LE u64) + heap ID (heap_id_len bytes).
-pub fn parse_link_creation_order_record(
-    data: &[u8],
-    heap_id_len: usize,
-) -> Option<(u64, Vec<u8>)> {
+pub fn parse_link_creation_order_record(data: &[u8], heap_id_len: usize) -> Option<(u64, Vec<u8>)> {
     if data.len() < 8 + heap_id_len {
         return None;
     }

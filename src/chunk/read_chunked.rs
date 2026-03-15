@@ -1,10 +1,3 @@
-use crate::error::Error;
-use crate::error::Result;
-use crate::filters::FilterPipeline;
-use crate::io::ReadAt;
-use crate::layout::ChunkIndexType;
-use crate::layout::DataLayout;
-
 use crate::chunk::btree_v1::read_btree_v1_entries;
 use crate::chunk::btree_v2::read_btree_v2_chunk_entries;
 use crate::chunk::extensible_array::read_extensible_array_entries;
@@ -12,6 +5,12 @@ use crate::chunk::fixed_array::read_fixed_array_entries;
 use crate::chunk::helpers::copy_chunk_to_output;
 use crate::chunk::implicit::read_implicit_chunk_entries;
 use crate::chunk::single_chunk::read_single_chunk_entries;
+use crate::error::Error;
+use crate::error::Result;
+use crate::filters::FilterPipeline;
+use crate::io::ReadAt;
+use crate::layout::ChunkIndexType;
+use crate::layout::DataLayout;
 
 /// Read a chunked dataset, assembling all chunks into a contiguous buffer.
 ///

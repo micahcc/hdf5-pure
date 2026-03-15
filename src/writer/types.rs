@@ -1,5 +1,4 @@
 use crate::datatype::Datatype;
-
 use crate::writer::DatasetNode;
 use crate::writer::GroupNode;
 
@@ -15,8 +14,7 @@ pub enum ChunkFilter {
 }
 
 /// Storage layout for a dataset.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub enum StorageLayout {
     /// Data stored in a contiguous block after the object header.
     #[default]
@@ -29,7 +27,6 @@ pub enum StorageLayout {
         filters: Vec<ChunkFilter>,
     },
 }
-
 
 pub(crate) enum ChildNode {
     Group(GroupNode),

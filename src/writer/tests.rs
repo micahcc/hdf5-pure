@@ -1,10 +1,11 @@
 use super::*;
-use crate::writer::encode::{
-    SUPERBLOCK_SIZE, encode_dataspace, encode_datatype, encode_superblock,
-};
 use crate::File;
 use crate::dataspace::Dataspace;
 use crate::datatype::ByteOrder;
+use crate::writer::encode::SUPERBLOCK_SIZE;
+use crate::writer::encode::encode_dataspace;
+use crate::writer::encode::encode_datatype;
+use crate::writer::encode::encode_superblock;
 
 #[test]
 fn encode_superblock_roundtrip() {
@@ -73,7 +74,8 @@ fn encode_datatype_f64() {
 
 #[test]
 fn encode_datatype_string() {
-    use crate::datatype::{CharacterSet, StringPadding};
+    use crate::datatype::CharacterSet;
+    use crate::datatype::StringPadding;
     let dt = crate::Datatype::fixed_string(10);
     let enc = encode_datatype(&dt).unwrap();
     assert_eq!(enc.len(), 8);
@@ -135,8 +137,12 @@ fn roundtrip_empty_file() {
 fn roundtrip_single_i32_dataset() {
     let mut w = FileWriter::new();
     let data: Vec<u8> = (0..10i32).flat_map(|x| x.to_le_bytes()).collect();
-    w.root_mut()
-        .add_dataset("numbers", crate::Datatype::native_i32(), &[10], data.clone());
+    w.root_mut().add_dataset(
+        "numbers",
+        crate::Datatype::native_i32(),
+        &[10],
+        data.clone(),
+    );
     let bytes = w.to_bytes().unwrap();
 
     let file = File::from_bytes(bytes.into_boxed_slice()).unwrap();
@@ -169,8 +175,12 @@ fn roundtrip_f64_dataset() {
 fn roundtrip_2d_dataset() {
     let mut w = FileWriter::new();
     let data: Vec<u8> = (0..12u16).flat_map(|x| x.to_le_bytes()).collect();
-    w.root_mut()
-        .add_dataset("matrix", crate::Datatype::native_u16(), &[3, 4], data.clone());
+    w.root_mut().add_dataset(
+        "matrix",
+        crate::Datatype::native_u16(),
+        &[3, 4],
+        data.clone(),
+    );
     let bytes = w.to_bytes().unwrap();
 
     let file = File::from_bytes(bytes.into_boxed_slice()).unwrap();
@@ -261,7 +271,12 @@ fn roundtrip_dataset_attribute() {
     let ds = w
         .root_mut()
         .add_dataset("temps", crate::Datatype::native_f64(), &[3], data);
-    ds.add_attribute("units", crate::Datatype::fixed_string(7), &[], b"celsius".to_vec());
+    ds.add_attribute(
+        "units",
+        crate::Datatype::fixed_string(7),
+        &[],
+        b"celsius".to_vec(),
+    );
     let bytes = w.to_bytes().unwrap();
 
     let file = File::from_bytes(bytes.into_boxed_slice()).unwrap();
@@ -373,10 +388,20 @@ fn roundtrip_complex_hierarchy() {
         .flat_map(|x| x.to_le_bytes())
         .collect();
     let ds = data_grp.add_dataset("measurements", crate::Datatype::native_f32(), &[2, 3], vals);
-    ds.add_attribute("units", crate::Datatype::fixed_string(1), &[], b"m".to_vec());
+    ds.add_attribute(
+        "units",
+        crate::Datatype::fixed_string(1),
+        &[],
+        b"m".to_vec(),
+    );
 
     let meta_grp = root.add_group("metadata");
-    meta_grp.add_attribute("author", crate::Datatype::fixed_string(4), &[], b"test".to_vec());
+    meta_grp.add_attribute(
+        "author",
+        crate::Datatype::fixed_string(4),
+        &[],
+        b"test".to_vec(),
+    );
 
     let bytes = w.to_bytes().unwrap();
 
@@ -405,6 +430,7 @@ fn roundtrip_with_timestamps() {
     let ts = (1700000000, 1700000000, 1700000000, 1700000000);
     let opts = WriteOptions {
         timestamps: Some(ts),
+        ..Default::default()
     };
     let mut w = FileWriter::with_options(opts);
     let data: Vec<u8> = (0..4i32).flat_map(|x| x.to_le_bytes()).collect();
@@ -423,6 +449,7 @@ fn timestamps_stored_in_object_header() {
     let ts = (1700000000, 1700000001, 1700000002, 1700000003);
     let opts = WriteOptions {
         timestamps: Some(ts),
+        ..Default::default()
     };
     let mut w = FileWriter::with_options(opts);
     w.root_mut().add_group("grp");
@@ -773,4 +800,67 @@ fn write_to_file_roundtrip() {
     let file = crate::File::open(&path).unwrap();
     let ds = file.root_group().unwrap().dataset("vals").unwrap();
     assert_eq!(ds.read_raw().unwrap(), data);
+}
+
+#[test]
+fn compat_simple_contiguous_v2() {
+    let reference = std::fs::read("tests/fixtures/simple_contiguous_v2.h5").unwrap();
+
+    let ts = (1704096000u32, 1704096000, 1704096000, 1704096000);
+    let opts = WriteOptions {
+        timestamps: Some(ts),
+        hdf5lib_compat: true,
+        ..Default::default()
+    };
+    let mut w = FileWriter::with_options(opts);
+
+    let values: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
+    let data: Vec<u8> = values.iter().flat_map(|x| x.to_le_bytes()).collect();
+    let ds = w
+        .root_mut()
+        .add_dataset("data", crate::Datatype::native_f64(), &[4], data);
+
+    // Add "units" string attribute (fixed-size, 5 bytes, null-terminated)
+    let attr_type = crate::Datatype::String {
+        size: 5,
+        padding: crate::datatype::StringPadding::NullTerminate,
+        char_set: crate::datatype::CharacterSet::Ascii,
+    };
+    let mut attr_value = b"m/s\0\0".to_vec();
+    attr_value.truncate(5);
+    ds.add_attribute("units", attr_type, &[], attr_value);
+
+    let our_bytes = w.to_bytes().unwrap();
+
+    // Compare byte-by-byte
+    if our_bytes != reference {
+        let max_len = our_bytes.len().max(reference.len());
+        let mut first_diff = None;
+        let mut diff_count = 0;
+        for i in 0..max_len {
+            let ours = our_bytes.get(i).copied();
+            let theirs = reference.get(i).copied();
+            if ours != theirs {
+                if first_diff.is_none() {
+                    first_diff = Some(i);
+                }
+                diff_count += 1;
+                if diff_count <= 20 {
+                    eprintln!(
+                        "  offset 0x{:04x}: ours={:?} ref={:?}",
+                        i,
+                        ours.map(|b| format!("0x{b:02x}")),
+                        theirs.map(|b| format!("0x{b:02x}")),
+                    );
+                }
+            }
+        }
+        panic!(
+            "byte mismatch: our_len={} ref_len={}, {} differences, first at offset 0x{:04x}",
+            our_bytes.len(),
+            reference.len(),
+            diff_count,
+            first_diff.unwrap_or(0),
+        );
+    }
 }

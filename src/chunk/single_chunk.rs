@@ -1,6 +1,5 @@
-use crate::error::Result;
-
 use crate::chunk::entry::ChunkEntry;
+use crate::error::Result;
 
 /// Single chunk: there's exactly one chunk covering the entire dataset.
 pub(crate) fn read_single_chunk_entries(

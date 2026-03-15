@@ -1,4 +1,5 @@
-use crate::error::{Error, Result};
+use crate::error::Error;
+use crate::error::Result;
 
 /// HDF5 datatype class IDs (from the on-disk encoding).
 ///

@@ -1,7 +1,6 @@
-use crate::error::Result;
-
 use crate::chunk::entry::ChunkEntry;
 use crate::chunk::helpers::linear_to_scaled;
+use crate::error::Result;
 
 /// Implicit index: chunks are stored contiguously, no index structure.
 /// Chunk at scaled coordinates is at: address + linear_index * chunk_byte_size.

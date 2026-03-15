@@ -8,13 +8,16 @@ use crate::error::Result;
 use crate::filters;
 use crate::superblock::HDF5_SIGNATURE;
 use crate::superblock::UNDEF_ADDR;
-
 use crate::writer::file_writer::WriteOptions;
-use crate::writer::types::{AttrData, ChunkFilter};
+use crate::writer::types::AttrData;
+use crate::writer::types::ChunkFilter;
 
 pub(crate) const SIZE_OF_OFFSETS: u8 = 8;
 pub(crate) const SIZE_OF_LENGTHS: u8 = 8;
 pub(crate) const SUPERBLOCK_SIZE: usize = 48;
+
+/// A single object header message: (type_id, body_bytes, message_flags).
+pub(crate) type OhdrMsg = (u8, Vec<u8>, u8);
 
 /// Total object header size given the sum of all message (header+body) bytes.
 pub(crate) fn ohdr_overhead(total_msg_bytes: usize, opts: &WriteOptions) -> usize {
@@ -24,11 +27,7 @@ pub(crate) fn ohdr_overhead(total_msg_bytes: usize, opts: &WriteOptions) -> usiz
 
 fn chunk_size_encoding(total_msg_bytes: usize, opts: &WriteOptions) -> (usize, u8) {
     let ts_extra = if opts.timestamps.is_some() { 16 } else { 0 };
-    let base_flags: u8 = if opts.timestamps.is_some() {
-        0x20
-    } else {
-        0
-    };
+    let base_flags: u8 = if opts.timestamps.is_some() { 0x20 } else { 0 };
     if total_msg_bytes <= 0xFF {
         (7 + ts_extra, base_flags)
     } else if total_msg_bytes <= 0xFFFF {
@@ -38,11 +37,26 @@ fn chunk_size_encoding(total_msg_bytes: usize, opts: &WriteOptions) -> (usize, u
     }
 }
 
+/// Encode an object header from messages.
+///
+/// If `target_chunk_size` is Some, pad with a NIL message to reach that chunk size.
 pub(crate) fn encode_object_header(
-    messages: &[(u8, Vec<u8>)],
+    messages: &[OhdrMsg],
     opts: &WriteOptions,
+    target_chunk_size: Option<usize>,
 ) -> Result<Vec<u8>> {
-    let total_msg_bytes: usize = messages.iter().map(|(_, b)| 4 + b.len()).sum();
+    let real_msg_bytes: usize = messages.iter().map(|(_, b, _)| 4 + b.len()).sum();
+
+    let total_msg_bytes = if let Some(target) = target_chunk_size {
+        assert!(
+            target >= real_msg_bytes,
+            "target_chunk_size ({target}) < real messages ({real_msg_bytes})"
+        );
+        target
+    } else {
+        real_msg_bytes
+    };
+
     let (prefix_size, flags) = chunk_size_encoding(total_msg_bytes, opts);
 
     let mut buf = Vec::with_capacity(prefix_size + total_msg_bytes + 4);
@@ -65,11 +79,25 @@ pub(crate) fn encode_object_header(
         _ => unreachable!(),
     }
 
-    for (type_id, body) in messages {
+    for (type_id, body, msg_flags) in messages {
         buf.push(*type_id);
         buf.extend_from_slice(&(body.len() as u16).to_le_bytes());
-        buf.push(0);
+        buf.push(*msg_flags);
         buf.extend_from_slice(body);
+    }
+
+    // Pad with NIL message if needed
+    let nil_bytes = total_msg_bytes - real_msg_bytes;
+    if nil_bytes > 0 {
+        assert!(
+            nil_bytes >= 4,
+            "NIL padding must be at least 4 bytes (header)"
+        );
+        let nil_body_len = nil_bytes - 4;
+        buf.push(0x00); // NIL type
+        buf.extend_from_slice(&(nil_body_len as u16).to_le_bytes());
+        buf.push(0x00); // NIL flags
+        buf.resize(buf.len() + nil_body_len, 0);
     }
 
     let cksum = checksum::lookup3(&buf);
@@ -361,20 +389,39 @@ pub(crate) fn encode_link(name: &str, target_addr: u64) -> Vec<u8> {
     buf
 }
 
-pub(crate) fn encode_fill_value_msg(fill_data: &Option<Vec<u8>>) -> Vec<u8> {
+/// Encode Fill Value message.
+///
+/// When `compat` is true, use late space allocation (matching the C library default).
+pub(crate) fn encode_fill_value_msg(fill_data: &Option<Vec<u8>>, compat: bool) -> Vec<u8> {
     match fill_data {
         Some(data) => {
+            let flags = if compat { 0x2a } else { 0x29 };
             let mut buf = Vec::with_capacity(6 + data.len());
             buf.push(3);
-            buf.push(0x29);
+            buf.push(flags);
             buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
             buf.extend_from_slice(data);
             buf
         }
         None => {
-            vec![3, 0x09]
+            // Version 3, flags:
+            // bits 0-1: space alloc time (1=early, 2=late)
+            // bits 2-3: fill write time (2=if-set)
+            // bit 4: fill defined (0=no)
+            let flags = if compat { 0x0a } else { 0x09 };
+            vec![3, flags]
         }
     }
+}
+
+/// Encode Attribute Info message (type 0x15).
+pub(crate) fn encode_attribute_info() -> Vec<u8> {
+    let mut buf = Vec::with_capacity(18);
+    buf.push(0); // version
+    buf.push(0); // flags
+    buf.extend_from_slice(&UNDEF_ADDR.to_le_bytes()); // fractal heap addr
+    buf.extend_from_slice(&UNDEF_ADDR.to_le_bytes()); // btree name addr
+    buf
 }
 
 pub(crate) fn encode_contiguous_layout(data_addr: u64, data_size: u64) -> Vec<u8> {
@@ -464,10 +511,7 @@ pub(crate) fn encode_chunked_layout(
     buf
 }
 
-pub(crate) fn encode_filter_pipeline(
-    chunk_filters: &[ChunkFilter],
-    element_size: u32,
-) -> Vec<u8> {
+pub(crate) fn encode_filter_pipeline(chunk_filters: &[ChunkFilter], element_size: u32) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.push(2);
     buf.push(chunk_filters.len() as u8);
@@ -528,4 +572,22 @@ pub(crate) fn limit_enc_size_u64(size: u64) -> usize {
     } else {
         8
     }
+}
+
+/// Compute the group OHDR target chunk size as the C library would.
+///
+/// The C library estimates space for `est_num_entries` links of `est_name_len` chars,
+/// plus LinkInfo and GroupInfo messages.
+pub(crate) fn compat_group_chunk_size(est_num_entries: usize, est_name_len: usize) -> usize {
+    let link_info_msg = 4 + 18; // header + body
+    let group_info_msg = 4 + 2;
+    let per_link = 4 + 1 + 1 + 1 + est_name_len + 8; // header(4) + ver(1) + flags(1) + name_len_field(1) + name + addr(8)
+    link_info_msg + group_info_msg + est_num_entries * per_link
+}
+
+/// Compute the dataset OHDR target chunk size as the C library would.
+///
+/// Returns max(256, actual_messages), which matches the C library's minimum OHDR allocation.
+pub(crate) fn compat_dataset_chunk_size(actual_msg_bytes: usize) -> usize {
+    actual_msg_bytes.max(256)
 }

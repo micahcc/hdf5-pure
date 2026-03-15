@@ -1,7 +1,7 @@
 use crate::datatype::Datatype;
-
 use crate::writer::DatasetNode;
-use crate::writer::types::{AttrData, ChildNode};
+use crate::writer::types::AttrData;
+use crate::writer::types::ChildNode;
 
 /// A group node in the file builder tree.
 pub struct GroupNode {
@@ -19,10 +19,8 @@ impl GroupNode {
 
     /// Add a child group, returning a mutable reference to it.
     pub fn add_group(&mut self, name: &str) -> &mut GroupNode {
-        self.children.push((
-            name.to_string(),
-            ChildNode::Group(GroupNode::new()),
-        ));
+        self.children
+            .push((name.to_string(), ChildNode::Group(GroupNode::new())));
         match &mut self.children.last_mut().unwrap().1 {
             ChildNode::Group(g) => g,
             _ => unreachable!(),

@@ -1,4 +1,5 @@
-use crate::error::{Error, Result};
+use crate::error::Error;
+use crate::error::Result;
 
 /// Verify and strip Fletcher32 checksum.
 pub(crate) fn verify_fletcher32(data: &[u8]) -> Result<Vec<u8>> {

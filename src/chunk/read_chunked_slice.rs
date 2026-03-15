@@ -1,16 +1,15 @@
-use crate::error::Error;
-use crate::error::Result;
-use crate::filters::FilterPipeline;
-use crate::io::ReadAt;
-use crate::layout::ChunkIndexType;
-use crate::layout::DataLayout;
-
 use crate::chunk::btree_v1::read_btree_v1_entries;
 use crate::chunk::btree_v2::read_btree_v2_chunk_entries;
 use crate::chunk::extensible_array::read_extensible_array_entries;
 use crate::chunk::fixed_array::read_fixed_array_entries;
 use crate::chunk::implicit::read_implicit_chunk_entries;
 use crate::chunk::single_chunk::read_single_chunk_entries;
+use crate::error::Error;
+use crate::error::Result;
+use crate::filters::FilterPipeline;
+use crate::io::ReadAt;
+use crate::layout::ChunkIndexType;
+use crate::layout::DataLayout;
 
 /// Read a hyperslab from a chunked dataset, only reading overlapping chunks.
 pub fn read_chunked_slice<R: ReadAt + ?Sized>(

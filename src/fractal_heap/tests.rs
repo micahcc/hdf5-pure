@@ -111,8 +111,7 @@ fn huge_ids_direct_computed_not_flag() {
     assert!(needed > (h2.heap_id_length as usize) - 1);
 
     // With filters: need sizeof_addr + sizeof_size + 4 + sizeof_size
-    let needed_filtered =
-        sizeof_addr as usize + sizeof_size as usize + 4 + sizeof_size as usize;
+    let needed_filtered = sizeof_addr as usize + sizeof_size as usize + 4 + sizeof_size as usize;
     // id_len=25 → 25-1=24 < 28 → indirect
     let h3 = FractalHeapHeader {
         heap_id_length: 25,

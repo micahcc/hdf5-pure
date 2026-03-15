@@ -1,7 +1,6 @@
+use crate::chunk::entry::ChunkEntry;
 use crate::error::Result;
 use crate::io::ReadAt;
-
-use crate::chunk::entry::ChunkEntry;
 
 /// Read chunk entries from a B-tree v2 chunk index (layout v4, index type 5).
 ///

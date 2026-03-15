@@ -1,4 +1,5 @@
-use crate::error::{Error, Result};
+use crate::error::Error;
+use crate::error::Result;
 
 /// Decompress DEFLATE (zlib) compressed data.
 pub(crate) fn decompress_deflate(data: &[u8]) -> Result<Vec<u8>> {
