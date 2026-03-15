@@ -291,7 +291,7 @@ impl Datatype {
         let byte_order = match (byte_order_hi, byte_order_lo) {
             (0, 0) => ByteOrder::LittleEndian,
             (0, 1) => ByteOrder::BigEndian,
-            (1, 0) => ByteOrder::Vax,
+            (1, 1) => ByteOrder::Vax, // VAX requires both bits set (H5Odtype.c:189-201)
             _ => {
                 return Err(Error::InvalidDatatype {
                     msg: "invalid floating-point byte order".into(),
@@ -369,11 +369,13 @@ impl Datatype {
                 pos += 1;
             }
             let name = String::from_utf8_lossy(&props[name_start..pos]).to_string();
+            let name_len = pos - name_start;
             pos += 1; // skip null terminator
 
-            // V1 and v2 pad name to 8-byte boundary
+            // V1/v2: pad name (incl. null terminator) to 8-byte multiple from name start.
+            // C formula: *pp += ((strlen + 8) / 8) * 8  (H5Odtype.c:427)
             if version < 3 {
-                pos = (pos + 7) & !7;
+                pos = name_start + ((name_len + 8) / 8) * 8;
             }
 
             // Byte offset of this member within the compound type
@@ -394,11 +396,13 @@ impl Datatype {
                     off
                 }
                 3 => {
-                    // Offset width depends on total compound size
+                    // Offset width: H5VM_limit_enc_size(size) = (log2(size)/8) + 1
                     let off_size = if size <= 0xFF {
                         1
                     } else if size <= 0xFFFF {
                         2
+                    } else if size <= 0xFFFFFF {
+                        3
                     } else {
                         4
                     };
@@ -410,6 +414,11 @@ impl Datatype {
                     let off = match off_size {
                         1 => props[pos] as u32,
                         2 => u16::from_le_bytes([props[pos], props[pos + 1]]) as u32,
+                        3 => {
+                            (props[pos] as u32)
+                                | ((props[pos + 1] as u32) << 8)
+                                | ((props[pos + 2] as u32) << 16)
+                        }
                         _ => u32::from_le_bytes([
                             props[pos],
                             props[pos + 1],
@@ -484,13 +493,15 @@ impl Datatype {
                 let mut pos = 0;
                 let props = &data[8..];
                 for _ in 0..nmembers {
-                    // name
+                    // name (with padding from name start for v1/v2)
+                    let name_start = pos;
                     while pos < props.len() && props[pos] != 0 {
                         pos += 1;
                     }
+                    let name_len = pos - name_start;
                     pos += 1;
                     if version < 3 {
-                        pos = (pos + 7) & !7;
+                        pos = name_start + ((name_len + 8) / 8) * 8;
                     }
                     // byte offset
                     if version == 3 {
@@ -498,6 +509,8 @@ impl Datatype {
                             1
                         } else if size <= 0xFFFF {
                             2
+                        } else if size <= 0xFFFFFF {
+                            3
                         } else {
                             4
                         };
@@ -519,14 +532,62 @@ impl Datatype {
             }
             7 => 0, // Reference
             8 => {
-                // Enum: base_type + nmembers * (name + value)
-                // This is complex; for now just return a safe overestimate
-                return Ok(data.len()); // consume remaining
+                // Enum: base_type + names + values (H5Odtype.c:1715-1730)
+                let nmembers = (class_bits & 0xFFFF) as usize;
+                let props = &data[8..];
+                // Base type
+                let base_encoded = Self::encoded_size(props)?;
+                let base_elem_size = u32::from_le_bytes([
+                    props[4], props[5], props[6], props[7],
+                ]) as usize;
+                let mut pos = base_encoded;
+                // Member names
+                for _ in 0..nmembers {
+                    let name_start = pos;
+                    while pos < props.len() && props[pos] != 0 {
+                        pos += 1;
+                    }
+                    let name_len = pos - name_start;
+                    pos += 1;
+                    if version < 3 {
+                        pos = name_start + ((name_len + 8) / 8) * 8;
+                    }
+                }
+                // Member values (packed)
+                pos += nmembers * base_elem_size;
+                pos
+            }
+            9 => {
+                // VarLen: just the base type (H5Odtype.c:1732-1734)
+                let props = &data[8..];
+                if props.len() >= 8 {
+                    Self::encoded_size(props)?
+                } else {
+                    0
+                }
             }
             10 => {
-                // Array: ndims + dim_sizes + element_type
-                // Complex layout; consume remaining
-                return Ok(data.len());
+                // Array (H5Odtype.c:1736-1744)
+                let props = &data[8..];
+                if props.is_empty() {
+                    return Err(Error::InvalidDatatype {
+                        msg: "array encoded_size: no properties".into(),
+                    });
+                }
+                let ndims = props[0] as usize;
+                let mut pos = 1;
+                if version < 3 {
+                    pos += 3; // 3 reserved bytes
+                }
+                pos += 4 * ndims; // dimension sizes
+                if version < 3 {
+                    pos += 4 * ndims; // permutation indices
+                }
+                // Base type
+                if pos + 8 <= props.len() {
+                    pos += Self::encoded_size(&props[pos..])?;
+                }
+                pos
             }
             11 => {
                 // Complex: base floating-point type
@@ -1108,5 +1169,242 @@ mod tests {
     fn reject_unknown_class() {
         let msg = build_dt_msg(15, 1, 0, 4, &[]);
         assert!(Datatype::parse(&msg).is_err());
+    }
+
+    #[test]
+    fn compound_v2_name_padding_from_name_start() {
+        // Compound v2: member 1 has String type (encoded_size=8), so member 2's
+        // name starts at props offset 20 (8+4+8), which is NOT 8-aligned globally.
+        // The v1/v2 padding must be relative to name_start, not absolute.
+        let mut props = Vec::new();
+
+        // Member "s": name padded to 8, offset(4), String type(8) = 20 bytes
+        let mut name1 = vec![0u8; 8]; // ((1+8)/8)*8 = 8
+        name1[0] = b's';
+        props.extend_from_slice(&name1);
+        props.extend_from_slice(&0u32.to_le_bytes()); // offset = 0
+        props.extend_from_slice(&build_dt_msg(3, 2, 0x00, 4, &[])); // String ASCII
+
+        // Member "n" starts at props offset 20. Name "n" padded to 8 from name_start.
+        let mut name2 = vec![0u8; 8]; // ((1+8)/8)*8 = 8
+        name2[0] = b'n';
+        props.extend_from_slice(&name2);
+        props.extend_from_slice(&4u32.to_le_bytes()); // offset = 4
+        props.extend_from_slice(&build_dt_msg(0, 2, 0x08, 8, &[0, 0, 64, 0])); // i64 LE
+
+        let msg = build_dt_msg(6, 2, 2, 12, &props);
+        let dt = Datatype::parse(&msg).unwrap();
+        match dt {
+            Datatype::Compound { size, members } => {
+                assert_eq!(size, 12);
+                assert_eq!(members.len(), 2);
+                assert_eq!(members[0].name, "s");
+                assert_eq!(members[0].byte_offset, 0);
+                assert_eq!(members[1].name, "n");
+                assert_eq!(members[1].byte_offset, 4);
+            }
+            other => panic!("expected Compound, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compound_v3_three_byte_offset() {
+        // Compound v3 with size > 65535 needs 3-byte member offset encoding.
+        let compound_size: u32 = 70000;
+        let mut props = Vec::new();
+
+        // Member "a": name "a\0" (unpadded v3), 3-byte offset=0, i32 type
+        props.extend_from_slice(b"a\0");
+        props.extend_from_slice(&[0, 0, 0]); // 3 bytes LE = 0
+        props.extend_from_slice(&build_dt_msg(0, 3, 0x08, 4, &[0, 0, 32, 0]));
+
+        // Member "b": name "b\0", 3-byte offset=69996, i32 type
+        props.extend_from_slice(b"b\0");
+        let off = 69996u32.to_le_bytes();
+        props.extend_from_slice(&off[..3]); // lower 3 bytes
+        props.extend_from_slice(&build_dt_msg(0, 3, 0x08, 4, &[0, 0, 32, 0]));
+
+        let msg = build_dt_msg(6, 3, 2, compound_size, &props);
+        let dt = Datatype::parse(&msg).unwrap();
+        match dt {
+            Datatype::Compound { size, members } => {
+                assert_eq!(size, compound_size);
+                assert_eq!(members.len(), 2);
+                assert_eq!(members[0].name, "a");
+                assert_eq!(members[0].byte_offset, 0);
+                assert_eq!(members[1].name, "b");
+                assert_eq!(members[1].byte_offset, 69996);
+            }
+            other => panic!("expected Compound, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compound_with_enum_member_encoded_size() {
+        // Compound v3 with an enum member followed by i32. Tests that
+        // encoded_size properly computes enum size (not data.len()).
+        let mut props = Vec::new();
+
+        // Member "e" at offset 0: Enum(i32, 2 members)
+        props.extend_from_slice(b"e\0");
+        props.push(0); // offset = 0 (1 byte, size=8)
+        let mut enum_props = Vec::new();
+        enum_props.extend_from_slice(&build_dt_msg(0, 3, 0x08, 4, &[0, 0, 32, 0]));
+        enum_props.extend_from_slice(b"A\0");
+        enum_props.extend_from_slice(b"B\0");
+        enum_props.extend_from_slice(&0i32.to_le_bytes());
+        enum_props.extend_from_slice(&1i32.to_le_bytes());
+        props.extend_from_slice(&build_dt_msg(8, 3, 2, 4, &enum_props));
+
+        // Member "n" at offset 4: i32
+        props.extend_from_slice(b"n\0");
+        props.push(4); // offset = 4
+        props.extend_from_slice(&build_dt_msg(0, 3, 0x08, 4, &[0, 0, 32, 0]));
+
+        let msg = build_dt_msg(6, 3, 2, 8, &props);
+        let dt = Datatype::parse(&msg).unwrap();
+        match dt {
+            Datatype::Compound { size, members } => {
+                assert_eq!(size, 8);
+                assert_eq!(members.len(), 2);
+                assert_eq!(members[0].name, "e");
+                assert_eq!(members[0].byte_offset, 0);
+                assert_eq!(members[1].name, "n");
+                assert_eq!(members[1].byte_offset, 4);
+            }
+            other => panic!("expected Compound, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compound_with_array_member_encoded_size() {
+        // Compound v3 with an array member followed by i32.
+        let mut props = Vec::new();
+
+        // Member "arr" at offset 0: Array(i32, dim=[3])
+        props.extend_from_slice(b"arr\0");
+        props.push(0); // offset = 0
+        let mut arr_props = Vec::new();
+        arr_props.push(1); // ndims = 1
+        arr_props.extend_from_slice(&3u32.to_le_bytes()); // dim[0] = 3
+        arr_props.extend_from_slice(&build_dt_msg(0, 3, 0x08, 4, &[0, 0, 32, 0]));
+        props.extend_from_slice(&build_dt_msg(10, 3, 0, 12, &arr_props));
+
+        // Member "n" at offset 12: i32
+        props.extend_from_slice(b"n\0");
+        props.push(12); // offset = 12
+        props.extend_from_slice(&build_dt_msg(0, 3, 0x08, 4, &[0, 0, 32, 0]));
+
+        let msg = build_dt_msg(6, 3, 2, 16, &props);
+        let dt = Datatype::parse(&msg).unwrap();
+        match dt {
+            Datatype::Compound { size, members } => {
+                assert_eq!(size, 16);
+                assert_eq!(members.len(), 2);
+                assert_eq!(members[0].name, "arr");
+                assert_eq!(members[0].byte_offset, 0);
+                assert_eq!(members[1].name, "n");
+                assert_eq!(members[1].byte_offset, 12);
+            }
+            other => panic!("expected Compound, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compound_with_vlen_member_encoded_size() {
+        // Compound v3 with a vlen member followed by i32.
+        let mut props = Vec::new();
+
+        // Member "v" at offset 0: VarLen(i32), sequence type
+        props.extend_from_slice(b"v\0");
+        props.push(0); // offset = 0
+        let base = build_dt_msg(0, 3, 0x08, 4, &[0, 0, 32, 0]);
+        props.extend_from_slice(&build_dt_msg(9, 3, 0, 16, &base));
+
+        // Member "n" at offset 16: i32
+        props.extend_from_slice(b"n\0");
+        props.push(16); // offset = 16
+        props.extend_from_slice(&build_dt_msg(0, 3, 0x08, 4, &[0, 0, 32, 0]));
+
+        let msg = build_dt_msg(6, 3, 2, 20, &props);
+        let dt = Datatype::parse(&msg).unwrap();
+        match dt {
+            Datatype::Compound { size, members } => {
+                assert_eq!(size, 20);
+                assert_eq!(members.len(), 2);
+                assert_eq!(members[0].name, "v");
+                assert_eq!(members[0].byte_offset, 0);
+                assert_eq!(members[1].name, "n");
+                assert_eq!(members[1].byte_offset, 16);
+            }
+            other => panic!("expected Compound, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn encoded_size_vlen() {
+        // VarLen(i32): 8 header + 12 base type = 20
+        let base = build_dt_msg(0, 3, 0x08, 4, &[0, 0, 32, 0]);
+        let msg = build_dt_msg(9, 3, 0, 16, &base);
+        assert_eq!(Datatype::encoded_size(&msg).unwrap(), 20);
+    }
+
+    #[test]
+    fn encoded_size_enum() {
+        // Enum v3(i32, 2 members "A","B"): 8 + 12(base) + 2("A\0") + 2("B\0") + 8(2*4 vals) = 32
+        let mut enum_props = Vec::new();
+        enum_props.extend_from_slice(&build_dt_msg(0, 3, 0x08, 4, &[0, 0, 32, 0]));
+        enum_props.extend_from_slice(b"A\0");
+        enum_props.extend_from_slice(b"B\0");
+        enum_props.extend_from_slice(&0i32.to_le_bytes());
+        enum_props.extend_from_slice(&1i32.to_le_bytes());
+        let msg = build_dt_msg(8, 3, 2, 4, &enum_props);
+        assert_eq!(Datatype::encoded_size(&msg).unwrap(), 32);
+    }
+
+    #[test]
+    fn parse_float_vax_byte_order() {
+        // VAX byte order requires BOTH bit 0 and bit 6 set: class_bits = 0x41
+        // (1,1) = VAX — not (1,0) which was the old (wrong) mapping.
+        let mut props = vec![0u8; 12];
+        props[2..4].copy_from_slice(&32u16.to_le_bytes());
+        props[4] = 23;
+        props[5] = 8;
+        props[6] = 0;
+        props[7] = 23;
+        props[8..12].copy_from_slice(&127u32.to_le_bytes());
+        let msg = build_dt_msg(1, 3, 0x41, 4, &props); // 0x41 = bit0 + bit6
+        let dt = Datatype::parse(&msg).unwrap();
+        match dt {
+            Datatype::FloatingPoint { byte_order, .. } => {
+                assert_eq!(byte_order, ByteOrder::Vax);
+            }
+            other => panic!("expected FloatingPoint, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_float_invalid_byte_order_hi1_lo0() {
+        // (byte_order_hi=1, byte_order_lo=0) = 0x40 → must be an error
+        let mut props = vec![0u8; 12];
+        props[2..4].copy_from_slice(&32u16.to_le_bytes());
+        props[4] = 23;
+        props[5] = 8;
+        props[6] = 0;
+        props[7] = 23;
+        props[8..12].copy_from_slice(&127u32.to_le_bytes());
+        let msg = build_dt_msg(1, 3, 0x40, 4, &props); // bit6 only, no bit0
+        assert!(Datatype::parse(&msg).is_err());
+    }
+
+    #[test]
+    fn encoded_size_array() {
+        // Array v3: 8 + 1(ndims) + 4(dim) + 12(i32 type) = 25
+        let mut arr_props = Vec::new();
+        arr_props.push(1);
+        arr_props.extend_from_slice(&3u32.to_le_bytes());
+        arr_props.extend_from_slice(&build_dt_msg(0, 3, 0x08, 4, &[0, 0, 32, 0]));
+        let msg = build_dt_msg(10, 3, 0, 12, &arr_props);
+        assert_eq!(Datatype::encoded_size(&msg).unwrap(), 25);
     }
 }

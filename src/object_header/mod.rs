@@ -206,18 +206,18 @@ impl ObjectHeader {
         let chunk_end = chunk_start + chunk_size;
 
         while pos < chunk_end {
-            // Check for gap byte (0x00) — padding at end of chunk
-            let first_byte = Le::read_u8(reader, pos).map_err(Error::Io)?;
-            if first_byte == 0 {
-                // Could be gap/padding — skip remaining bytes
-                // (all zero bytes at end of chunk are gap)
+            // Check for gap: if remaining bytes are fewer than a message header,
+            // they are gap padding (H5Ocache.c:1246 — loop reads until eom_ptr).
+            let min_msg_header: u64 = if (header_flags & 0x04) != 0 { 6 } else { 4 };
+            if chunk_end - pos < min_msg_header {
                 break;
             }
 
-            // Message header: type (1 or 2 bytes), size (1 or 2 bytes), flags (1 byte)
-            // In v2 object headers, message header is:
-            //   type (u8), size (u16), flags (u8) [+ creation_order (u16) if tracked]
-            let msg_type_raw = first_byte;
+            // Message header: type (u8), size (u16), flags (u8)
+            //   [+ creation_order (u16) if tracked]
+            // Type 0 is the Nil message — a valid message that acts as padding
+            // with a proper header and size field (H5Ocache.c:1309).
+            let msg_type_raw = Le::read_u8(reader, pos).map_err(Error::Io)?;
             let msg_size = Le::read_u16(reader, pos + 1).map_err(Error::Io)?;
             let msg_flags = Le::read_u8(reader, pos + 3).map_err(Error::Io)?;
 

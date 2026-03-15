@@ -1046,3 +1046,134 @@ fn read_btree_v2_filtered() {
     let expected: Vec<i32> = (0..24).collect();
     assert_eq!(values, expected);
 }
+
+// ── Fractal heap indirect block traversal ──
+
+#[test]
+fn read_fheap_indirect_links() {
+    let file = File::open(fixture("fheap_indirect.h5")).unwrap();
+    let root = file.root_group().unwrap();
+    let grp = root.group("many").unwrap();
+
+    let members = grp.members().unwrap();
+    // 120 child groups + 1 dataset
+    assert_eq!(members.len(), 121);
+
+    // Verify a few child groups exist
+    assert!(members.contains(&"child_group_0000_padding".to_string()));
+    assert!(members.contains(&"child_group_0059_padding".to_string()));
+    assert!(members.contains(&"child_group_0119_padding".to_string()));
+
+    // Verify the dataset is accessible through the group
+    let ds = grp.dataset("values").unwrap();
+    let raw = ds.read_raw().unwrap();
+    let values: Vec<i32> = raw
+        .chunks_exact(4)
+        .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert_eq!(values, vec![10, 20, 30, 40, 50]);
+}
+
+// ── Nil message handling in object headers ──
+
+#[test]
+fn read_nil_messages_dataset() {
+    let file = File::open(fixture("nil_messages.h5")).unwrap();
+    let root = file.root_group().unwrap();
+    let ds = root.dataset("data").unwrap();
+
+    // Read data through an object header that may contain nil padding messages
+    let raw = ds.read_raw().unwrap();
+    let values: Vec<i32> = raw
+        .chunks_exact(4)
+        .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert_eq!(values, vec![1, 2, 3, 4]);
+
+    // All 12 attributes should be readable
+    let attrs = ds.attributes().unwrap();
+    assert_eq!(attrs.len(), 12);
+    for i in 0..12 {
+        let name = format!("attribute_{}", i);
+        let attr = attrs.iter().find(|a| a.name == name);
+        assert!(attr.is_some(), "missing attribute {}", name);
+        let val = i32::from_le_bytes(attr.unwrap().raw_value[..4].try_into().unwrap());
+        assert_eq!(val, (i + 1) * 10);
+    }
+}
+
+// ── Global heap free-space entry handling ──
+
+#[test]
+fn read_gcol_free_space_vlen() {
+    let file = File::open(fixture("gcol_free_space.h5")).unwrap();
+    let root = file.root_group().unwrap();
+    let ds = root.dataset("strings").unwrap();
+
+    // The dataset was overwritten with shorter strings, so the global heap
+    // collection may contain free-space entries (index 0) that must be skipped.
+    let strings = ds.read_vlen_strings().unwrap();
+    assert_eq!(strings, vec!["hi", "there", "hdf5", "test"]);
+}
+
+// ── Compound with enum/array members (encoded_size fix) ──
+
+#[test]
+fn read_compound_complex_members_metadata() {
+    let file = File::open(fixture("compound_complex_members.h5")).unwrap();
+    let root = file.root_group().unwrap();
+    let ds = root.dataset("records").unwrap();
+
+    let dt = ds.datatype().unwrap();
+    match &dt {
+        Datatype::Compound { size, members } => {
+            assert_eq!(*size, 20); // 4 + 12 + 4
+            assert_eq!(members.len(), 3);
+            assert_eq!(members[0].name, "color");
+            assert_eq!(members[0].byte_offset, 0);
+            // "color" member should be an Enum type
+            match &members[0].datatype {
+                Datatype::Enum { base, members: evals } => {
+                    assert_eq!(base.element_size(), 4);
+                    assert_eq!(evals.len(), 3);
+                }
+                other => panic!("expected Enum for 'color', got {:?}", other),
+            }
+            assert_eq!(members[1].name, "coords");
+            assert_eq!(members[1].byte_offset, 4);
+            // "coords" member should be an Array type
+            match &members[1].datatype {
+                Datatype::Array { dimensions, element_type } => {
+                    assert_eq!(dimensions, &vec![3]);
+                    assert_eq!(element_type.element_size(), 4);
+                }
+                other => panic!("expected Array for 'coords', got {:?}", other),
+            }
+            assert_eq!(members[2].name, "id");
+            assert_eq!(members[2].byte_offset, 16);
+        }
+        other => panic!("expected Compound, got {:?}", other),
+    }
+}
+
+#[test]
+fn read_compound_complex_members_data() {
+    let file = File::open(fixture("compound_complex_members.h5")).unwrap();
+    let root = file.root_group().unwrap();
+    let ds = root.dataset("records").unwrap();
+    let raw = ds.read_raw().unwrap();
+
+    assert_eq!(raw.len(), 60); // 3 records * 20 bytes
+    // Record 0: color=0, coords=[10,20,30], id=100
+    let r = &raw[0..20];
+    assert_eq!(i32::from_le_bytes(r[0..4].try_into().unwrap()), 0);
+    assert_eq!(i32::from_le_bytes(r[4..8].try_into().unwrap()), 10);
+    assert_eq!(i32::from_le_bytes(r[8..12].try_into().unwrap()), 20);
+    assert_eq!(i32::from_le_bytes(r[12..16].try_into().unwrap()), 30);
+    assert_eq!(i32::from_le_bytes(r[16..20].try_into().unwrap()), 100);
+    // Record 2: color=2, coords=[70,80,90], id=300
+    let r = &raw[40..60];
+    assert_eq!(i32::from_le_bytes(r[0..4].try_into().unwrap()), 2);
+    assert_eq!(i32::from_le_bytes(r[4..8].try_into().unwrap()), 70);
+    assert_eq!(i32::from_le_bytes(r[16..20].try_into().unwrap()), 300);
+}

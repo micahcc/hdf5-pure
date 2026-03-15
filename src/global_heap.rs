@@ -80,8 +80,14 @@ pub fn read_global_heap_object<R: ReadAt + ?Sized>(
         let data_start = pos + obj_header_size;
 
         if idx == 0 {
-            // Free space marker — end of objects
-            break;
+            // Free space entry — skip over it and continue (H5HGcache.c:352-358).
+            // For idx 0, the size field includes the entry header; advance from
+            // the start of this entry by obj_size bytes.
+            if obj_size == 0 {
+                break;
+            }
+            pos += obj_size;
+            continue;
         }
 
         if idx == object_index {
@@ -281,6 +287,48 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0], b"hello");
         assert_eq!(results[1], b"world!");
+    }
+
+    /// Build a collection with a free-space entry (index 0) before a real object.
+    #[test]
+    fn skip_free_space_entry() {
+        let sl = 8usize;
+        let obj_header_size = 8 + sl;
+
+        // Object: index=2, data = "found"
+        let obj_data = b"found!!!"; // 8 bytes, already aligned
+        let obj_padded = 8usize;
+
+        // Free space entry: index=0, size = total size of the free space region
+        // (includes the free space entry header itself)
+        let free_total_size = obj_header_size + 16; // header + 16 bytes of dead space
+
+        let collection_size = (8 + sl) + free_total_size + obj_header_size + obj_padded;
+
+        let mut buf = Vec::new();
+        // Collection header
+        buf.extend_from_slice(b"GCOL");
+        buf.push(1);
+        buf.extend_from_slice(&[0, 0, 0]);
+        buf.extend_from_slice(&(collection_size as u64).to_le_bytes());
+
+        // Free space entry (index 0)
+        buf.extend_from_slice(&0u16.to_le_bytes());    // index = 0
+        buf.extend_from_slice(&0u16.to_le_bytes());    // refcount
+        buf.extend_from_slice(&[0u8; 4]);               // reserved
+        buf.extend_from_slice(&(free_total_size as u64).to_le_bytes()); // size (includes header)
+        // Dead space within the free entry
+        buf.extend_from_slice(&[0u8; 16]);
+
+        // Real object (index 2)
+        buf.extend_from_slice(&2u16.to_le_bytes());    // index = 2
+        buf.extend_from_slice(&1u16.to_le_bytes());    // refcount
+        buf.extend_from_slice(&[0u8; 4]);               // reserved
+        buf.extend_from_slice(&(obj_data.len() as u64).to_le_bytes()); // size
+        buf.extend_from_slice(obj_data);
+
+        let result = read_global_heap_object(buf.as_slice(), 0, 2, 8).unwrap();
+        assert_eq!(result, b"found!!!");
     }
 
     #[test]

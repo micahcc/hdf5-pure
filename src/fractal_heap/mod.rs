@@ -217,13 +217,40 @@ impl FractalHeapHeader {
     ///
     /// Formula: row_block_size[0] = starting_block_size
     ///          row_block_size[u] = starting_block_size * 2^(u-1) for u >= 1
+    /// Compute the block size for a given row number.
+    ///
+    /// Row 0 and row 1 both have `starting_block_size`.
+    /// Row 2 = 2 * starting_block_size, row 3 = 4 * starting_block_size, etc.
+    /// Does NOT cap at max_direct_block_size — indirect rows continue doubling
+    /// to represent the total managed space of their sub-trees (H5HFdtable.c:110-119).
     pub fn block_size_for_row(&self, row: u32) -> u64 {
         if row <= 1 {
             self.starting_block_size
         } else {
-            let size = self.starting_block_size * (1u64 << (row - 1));
-            size.min(self.max_direct_block_size)
+            self.starting_block_size * (1u64 << (row - 1))
         }
+    }
+
+    /// Number of rows that contain direct blocks.
+    ///
+    /// C: `max_dblock_rows = (max_direct_bits - start_bits) + 2` (H5HFdtable.c:94)
+    pub fn max_direct_rows(&self) -> u32 {
+        if self.max_direct_block_size == 0 || self.starting_block_size == 0 {
+            return 0;
+        }
+        (self.max_direct_block_size / self.starting_block_size)
+            .trailing_zeros() as u32
+            + 2
+    }
+
+    /// Number of rows in a child indirect block at a given row.
+    ///
+    /// C: `nrows = log2(row_block_size) - first_row_bits + 1` (H5HFdtable.c:237-251)
+    pub fn child_indirect_nrows(&self, row: u32) -> u32 {
+        let first_row_bits =
+            (self.starting_block_size * self.table_width as u64).trailing_zeros();
+        let log2_bs = self.block_size_for_row(row).trailing_zeros();
+        log2_bs - first_row_bits + 1
     }
 
     /// Number of bytes needed to encode a block offset within the heap.
@@ -278,23 +305,57 @@ fn read_huge_object<R: ReadAt + ?Sized>(
     size_of_offsets: u8,
     size_of_lengths: u8,
 ) -> Result<Vec<u8>> {
-    let directly_accessed = (header.flags & 0x02) != 0;
     let o = size_of_offsets as usize;
     let l = size_of_lengths as usize;
 
-    if directly_accessed {
-        // Heap ID directly encodes address + length
-        if heap_id.len() < 1 + o + l {
-            return Err(Error::InvalidFractalHeap {
-                msg: "huge object heap ID too short for direct access".into(),
-            });
-        }
-        let address = read_var_le(&heap_id[1..], o);
-        let length = read_var_le(&heap_id[1 + o..], l);
+    // `huge_ids_direct` is NOT a flag bit — it's derived from whether the
+    // heap ID is large enough to hold address + length inline.
+    // H5HFhuge.c:166-219: sizeof_addr + sizeof_size [+ 4 + sizeof_size if filtered]
+    let has_filters = header.io_filter_encoded_length > 0;
+    let needed = if has_filters { o + l + 4 + l } else { o + l };
+    let directly_accessed = needed <= (header.heap_id_length as usize).saturating_sub(1);
 
-        let mut data = vec![0u8; length as usize];
-        reader.read_exact_at(address, &mut data).map_err(Error::Io)?;
-        Ok(data)
+    if directly_accessed {
+        if has_filters {
+            // Direct access with filters: address + filtered_length + filter_mask + mem_length
+            if heap_id.len() < 1 + o + l + 4 + l {
+                return Err(Error::InvalidFractalHeap {
+                    msg: "huge object heap ID too short for filtered direct access".into(),
+                });
+            }
+            let address = read_var_le(&heap_id[1..], o);
+            let filtered_length = read_var_le(&heap_id[1 + o..], l);
+            let filter_mask = u32::from_le_bytes([
+                heap_id[1 + o + l],
+                heap_id[1 + o + l + 1],
+                heap_id[1 + o + l + 2],
+                heap_id[1 + o + l + 3],
+            ]);
+            let _mem_length = read_var_le(&heap_id[1 + o + l + 4..], l);
+
+            let mut compressed = vec![0u8; filtered_length as usize];
+            reader.read_exact_at(address, &mut compressed).map_err(Error::Io)?;
+
+            if let Some(pipeline) = &header.filter_pipeline {
+                if filter_mask == 0 {
+                    compressed = pipeline.decompress(compressed)?;
+                }
+            }
+            Ok(compressed)
+        } else {
+            // Direct access without filters: address + length
+            if heap_id.len() < 1 + o + l {
+                return Err(Error::InvalidFractalHeap {
+                    msg: "huge object heap ID too short for direct access".into(),
+                });
+            }
+            let address = read_var_le(&heap_id[1..], o);
+            let length = read_var_le(&heap_id[1 + o..], l);
+
+            let mut data = vec![0u8; length as usize];
+            reader.read_exact_at(address, &mut data).map_err(Error::Io)?;
+            Ok(data)
+        }
     } else {
         // Indirectly accessed: heap ID contains a unique ID, look up in B-tree v2
         let id_bytes = (header.heap_id_length as usize).saturating_sub(1);
@@ -576,15 +637,7 @@ fn read_from_indirect_block<R: ReadAt + ?Sized>(
     let has_filters = header.io_filter_encoded_length > 0;
 
     // Determine which rows are direct vs indirect.
-    // Rows 0..max_direct_rows are direct blocks.
-    // max_direct_rows = log2(max_direct_block_size / starting_block_size) + 1
-    let max_direct_rows = if header.max_direct_block_size > 0 && header.starting_block_size > 0 {
-        (header.max_direct_block_size / header.starting_block_size)
-            .trailing_zeros() as u32
-            + 1
-    } else {
-        nrows
-    };
+    let max_direct_rows = header.max_direct_rows();
 
     // Walk through entries to find the one containing our heap_offset
     let mut current_heap_offset = 0u64;
@@ -633,8 +686,8 @@ fn read_from_indirect_block<R: ReadAt + ?Sized>(
                         block_size,
                     );
                 } else {
-                    // Recurse into indirect block
-                    let child_nrows = row - max_direct_rows + 1; // simplified
+                    // Recurse into child indirect block
+                    let child_nrows = header.child_indirect_nrows(row);
                     return read_from_indirect_block(
                         reader,
                         header,
@@ -658,4 +711,136 @@ fn read_from_indirect_block<R: ReadAt + ?Sized>(
             heap_offset, iblock_addr
         ),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a FractalHeapHeader with just the fields needed for doubling-table math.
+    fn make_header(starting_block_size: u64, max_direct_block_size: u64, table_width: u16) -> FractalHeapHeader {
+        FractalHeapHeader {
+            heap_id_length: 7,
+            io_filter_encoded_length: 0,
+            flags: 0,
+            max_managed_object_size: 0,
+            next_huge_object_id: 0,
+            huge_bt2_address: u64::MAX,
+            free_space_in_managed: 0,
+            free_space_manager_address: u64::MAX,
+            managed_space_total: 0,
+            managed_space_allocated: 0,
+            managed_alloc_iterator_offset: 0,
+            managed_objects_count: 0,
+            huge_objects_total_size: 0,
+            huge_objects_count: 0,
+            tiny_objects_total_size: 0,
+            tiny_objects_count: 0,
+            table_width,
+            starting_block_size,
+            max_direct_block_size,
+            max_heap_size_bits: 32,
+            starting_root_rows: 0,
+            root_block_address: u64::MAX,
+            current_root_rows: 0,
+            filtered_root_direct_block_size: None,
+            io_filter_mask: None,
+            filter_pipeline: None,
+        }
+    }
+
+    #[test]
+    fn test_block_size_for_row() {
+        let h = make_header(512, 65536, 4);
+        assert_eq!(h.block_size_for_row(0), 512);
+        assert_eq!(h.block_size_for_row(1), 512);
+        assert_eq!(h.block_size_for_row(2), 1024);
+        assert_eq!(h.block_size_for_row(3), 2048);
+        assert_eq!(h.block_size_for_row(8), 65536);
+        // Indirect rows continue doubling past max_direct_block_size
+        assert_eq!(h.block_size_for_row(9), 131072);
+        assert_eq!(h.block_size_for_row(10), 262144);
+    }
+
+    #[test]
+    fn test_max_direct_rows() {
+        // start=512, max_direct=65536: (16-9)+2 = 9
+        let h = make_header(512, 65536, 4);
+        assert_eq!(h.max_direct_rows(), 9);
+
+        // start=1024, max_direct=65536: (16-10)+2 = 8
+        let h2 = make_header(1024, 65536, 4);
+        assert_eq!(h2.max_direct_rows(), 8);
+
+        // start=256, max_direct=65536: (16-8)+2 = 10
+        let h3 = make_header(256, 65536, 4);
+        assert_eq!(h3.max_direct_rows(), 10);
+
+        // start=512, max_direct=512: (9-9)+2 = 2
+        let h4 = make_header(512, 512, 4);
+        assert_eq!(h4.max_direct_rows(), 2);
+    }
+
+    #[test]
+    fn test_child_indirect_nrows() {
+        // start=512, width=4, max_direct=65536
+        // first_row_bits = log2(512*4) = log2(2048) = 11
+        let h = make_header(512, 65536, 4);
+
+        // Row 9 (first indirect row): block_size = 131072, log2 = 17
+        // nrows = 17 - 11 + 1 = 7
+        assert_eq!(h.child_indirect_nrows(9), 7);
+
+        // Row 10: block_size = 262144, log2 = 18
+        // nrows = 18 - 11 + 1 = 8
+        assert_eq!(h.child_indirect_nrows(10), 8);
+    }
+
+    #[test]
+    fn huge_ids_direct_computed_not_flag() {
+        // huge_ids_direct is derived from id_len, NOT from flags byte.
+        // flags=0x02 is "checksum direct blocks", not "direct huge IDs".
+        // H5HFhuge.c: direct if sizeof_addr + sizeof_size <= id_len - 1
+        let sizeof_addr: u8 = 8;
+        let sizeof_size: u8 = 8;
+
+        // id_len=17 → 17-1=16 >= 8+8=16 → direct
+        let h1 = FractalHeapHeader {
+            heap_id_length: 17,
+            io_filter_encoded_length: 0,
+            flags: 0, // no flag bits set, yet should still be "direct"
+            ..make_header(512, 65536, 4)
+        };
+        let needed = sizeof_addr as usize + sizeof_size as usize;
+        assert!(needed <= (h1.heap_id_length as usize) - 1);
+
+        // id_len=8 → 8-1=7 < 16 → indirect (must use B-tree)
+        let h2 = FractalHeapHeader {
+            heap_id_length: 8,
+            io_filter_encoded_length: 0,
+            flags: 0x02, // checksum flag set, but should NOT mean "direct"
+            ..make_header(512, 65536, 4)
+        };
+        assert!(needed > (h2.heap_id_length as usize) - 1);
+
+        // With filters: need sizeof_addr + sizeof_size + 4 + sizeof_size
+        let needed_filtered = sizeof_addr as usize + sizeof_size as usize + 4 + sizeof_size as usize;
+        // id_len=25 → 25-1=24 < 28 → indirect
+        let h3 = FractalHeapHeader {
+            heap_id_length: 25,
+            io_filter_encoded_length: 12,
+            flags: 0,
+            ..make_header(512, 65536, 4)
+        };
+        assert!(needed_filtered > (h3.heap_id_length as usize) - 1);
+
+        // id_len=29 → 29-1=28 >= 28 → direct
+        let h4 = FractalHeapHeader {
+            heap_id_length: 29,
+            io_filter_encoded_length: 12,
+            flags: 0,
+            ..make_header(512, 65536, 4)
+        };
+        assert!(needed_filtered <= (h4.heap_id_length as usize) - 1);
+    }
 }

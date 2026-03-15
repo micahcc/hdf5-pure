@@ -1065,6 +1065,262 @@ static void create_btree_v2_filtered(const char *filename)
     printf("Created %s\n", filename);
 }
 
+/* Create a group with enough child groups to force the fractal heap root
+ * to become an indirect block (exercises indirect block traversal). */
+static void create_fheap_indirect(const char *filename)
+{
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_V110, H5F_LIBVER_V110);
+
+    hid_t file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+
+    /* Force dense link storage immediately */
+    hid_t gcpl = H5Pcreate(H5P_GROUP_CREATE);
+    H5Pset_link_phase_change(gcpl, 0, 0);
+
+    hid_t grp = H5Gcreate2(file, "many", H5P_DEFAULT, gcpl, H5P_DEFAULT);
+
+    /* Create 120 child groups with long names to overflow initial direct block */
+    char name[64];
+    for (int i = 0; i < 120; i++) {
+        snprintf(name, sizeof(name), "child_group_%04d_padding", i);
+        hid_t child = H5Gcreate2(grp, name, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+        H5Gclose(child);
+    }
+
+    /* Also add a dataset so we can verify data access through the group */
+    hsize_t dims[1] = {5};
+    hid_t space = H5Screate_simple(1, dims, NULL);
+    hid_t dset = H5Dcreate2(grp, "values", H5T_STD_I32LE, space,
+                             H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    int32_t vals[5] = {10, 20, 30, 40, 50};
+    H5Dwrite(dset, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, vals);
+
+    H5Dclose(dset);
+    H5Sclose(space);
+    H5Gclose(grp);
+    H5Pclose(gcpl);
+    H5Fclose(file);
+    H5Pclose(fapl);
+    printf("Created %s\n", filename);
+}
+
+/* Create a dataset with enough attributes that the object header contains
+ * nil (type 0) padding messages between real messages, exercising the nil
+ * message skip path in the object header parser. */
+static void create_nil_messages(const char *filename)
+{
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_V110, H5F_LIBVER_V110);
+
+    hid_t file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+
+    /* Dataset with small data but many attributes to fill the header chunk */
+    hsize_t dims[1] = {4};
+    hid_t space = H5Screate_simple(1, dims, NULL);
+    hid_t dset = H5Dcreate2(file, "data", H5T_STD_I32LE, space,
+                             H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    int32_t vals[4] = {1, 2, 3, 4};
+    H5Dwrite(dset, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, vals);
+
+    /* Add attributes with varying name lengths to create uneven alignment
+     * and force nil message padding in the object header */
+    hid_t scalar = H5Screate(H5S_SCALAR);
+    char aname[64];
+    for (int i = 0; i < 12; i++) {
+        snprintf(aname, sizeof(aname), "attribute_%d", i);
+        hid_t attr = H5Acreate2(dset, aname, H5T_STD_I32LE, scalar,
+                                 H5P_DEFAULT, H5P_DEFAULT);
+        int32_t v = (i + 1) * 10;
+        H5Awrite(attr, H5T_NATIVE_INT, &v);
+        H5Aclose(attr);
+    }
+
+    H5Sclose(scalar);
+    H5Dclose(dset);
+    H5Sclose(space);
+    H5Fclose(file);
+    H5Pclose(fapl);
+    printf("Created %s\n", filename);
+}
+
+/* Create a vlen string dataset, then delete and re-create entries to
+ * produce global heap collections with free-space (index 0) entries
+ * interspersed with valid objects. */
+static void create_gcol_free_space(const char *filename)
+{
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_V110, H5F_LIBVER_V110);
+
+    hid_t file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+
+    /* First create a vlen string dataset and write it */
+    hid_t str_type = H5Tcopy(H5T_C_S1);
+    H5Tset_size(str_type, H5T_VARIABLE);
+
+    hsize_t dims[1] = {4};
+    hid_t space = H5Screate_simple(1, dims, NULL);
+    hid_t dset = H5Dcreate2(file, "strings", str_type, space,
+                             H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+
+    /* Write initial values (long strings to use space) */
+    const char *data1[4] = {
+        "this_is_a_long_string_alpha",
+        "this_is_a_long_string_bravo",
+        "short",
+        "this_is_a_long_string_delta"
+    };
+    H5Dwrite(dset, str_type, H5S_ALL, H5S_ALL, H5P_DEFAULT, data1);
+
+    /* Overwrite with shorter strings to potentially create free space in
+     * the global heap collection */
+    const char *data2[4] = {"hi", "there", "hdf5", "test"};
+    H5Dwrite(dset, str_type, H5S_ALL, H5S_ALL, H5P_DEFAULT, data2);
+
+    H5Dclose(dset);
+    H5Tclose(str_type);
+    H5Sclose(space);
+    H5Fclose(file);
+    H5Pclose(fapl);
+    printf("Created %s\n", filename);
+}
+
+/* Create a compound type containing enum, array, and plain int32 members.
+ * Exercises encoded_size computation for Enum and Array within compound types.
+ * Without the encoded_size fix, the parser would consume all remaining bytes
+ * when computing the Enum/Array member's size, failing to parse subsequent members. */
+static void create_compound_complex_members(const char *filename)
+{
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_V110, H5F_LIBVER_V110);
+
+    hid_t file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+
+    /* Create an enum type (base int32, 3 values) */
+    hid_t enum_type = H5Tenum_create(H5T_STD_I32LE);
+    int32_t eval;
+    eval = 0; H5Tenum_insert(enum_type, "RED", &eval);
+    eval = 1; H5Tenum_insert(enum_type, "GREEN", &eval);
+    eval = 2; H5Tenum_insert(enum_type, "BLUE", &eval);
+
+    /* Create an array type: int32[3] */
+    hsize_t arr_dims[1] = {3};
+    hid_t arr_type = H5Tarray_create2(H5T_STD_I32LE, 1, arr_dims);
+
+    /* Build compound: { int32 color (enum); int32 coords[3] (array); int32 id; }
+     * = 4 + 12 + 4 = 20 bytes */
+    hid_t comp = H5Tcreate(H5T_COMPOUND, 20);
+    H5Tinsert(comp, "color", 0, enum_type);
+    H5Tinsert(comp, "coords", 4, arr_type);
+    H5Tinsert(comp, "id", 16, H5T_STD_I32LE);
+
+    hsize_t dims[1] = {3};
+    hid_t space = H5Screate_simple(1, dims, NULL);
+    hid_t dset = H5Dcreate2(file, "records", comp, space,
+                             H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+
+    /* Write 3 records */
+    uint8_t data[60]; /* 3 * 20 = 60 */
+    memset(data, 0, sizeof(data));
+    /* Record 0: color=RED(0), coords=[10,20,30], id=100 */
+    int32_t tmp;
+    tmp = 0;   memcpy(data + 0, &tmp, 4);
+    tmp = 10;  memcpy(data + 4, &tmp, 4);
+    tmp = 20;  memcpy(data + 8, &tmp, 4);
+    tmp = 30;  memcpy(data + 12, &tmp, 4);
+    tmp = 100; memcpy(data + 16, &tmp, 4);
+    /* Record 1: color=GREEN(1), coords=[40,50,60], id=200 */
+    tmp = 1;   memcpy(data + 20, &tmp, 4);
+    tmp = 40;  memcpy(data + 24, &tmp, 4);
+    tmp = 50;  memcpy(data + 28, &tmp, 4);
+    tmp = 60;  memcpy(data + 32, &tmp, 4);
+    tmp = 200; memcpy(data + 36, &tmp, 4);
+    /* Record 2: color=BLUE(2), coords=[70,80,90], id=300 */
+    tmp = 2;   memcpy(data + 40, &tmp, 4);
+    tmp = 70;  memcpy(data + 44, &tmp, 4);
+    tmp = 80;  memcpy(data + 48, &tmp, 4);
+    tmp = 90;  memcpy(data + 52, &tmp, 4);
+    tmp = 300; memcpy(data + 56, &tmp, 4);
+
+    H5Dwrite(dset, comp, H5S_ALL, H5S_ALL, H5P_DEFAULT, data);
+
+    H5Dclose(dset);
+    H5Sclose(space);
+    H5Tclose(comp);
+    H5Tclose(arr_type);
+    H5Tclose(enum_type);
+    H5Fclose(file);
+    H5Pclose(fapl);
+    printf("Created %s\n", filename);
+}
+
+/* Create a file exercising SWMR (Single Writer Multiple Reader) mode.
+ * SWMR requires superblock v3 and chunked datasets.
+ * The file is created normally, then reopened in SWMR write mode where
+ * the dataset is extended and new data is written. After clean close the
+ * SWMR flags are cleared, but the file retains superblock v3 layout and
+ * data written during the SWMR session. */
+static void create_swmr(const char *filename)
+{
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    H5Pset_libver_bounds(fapl, H5F_LIBVER_V110, H5F_LIBVER_V110);
+
+    /* Phase 1: Create file with chunked dataset + attribute */
+    hid_t file = H5Fcreate(filename, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+
+    hsize_t dims[1] = {4};
+    hsize_t maxdims[1] = {H5S_UNLIMITED};
+    hid_t space = H5Screate_simple(1, dims, maxdims);
+
+    hid_t dcpl = H5Pcreate(H5P_DATASET_CREATE);
+    hsize_t chunk_dims[1] = {4};
+    H5Pset_chunk(dcpl, 1, chunk_dims);
+
+    hid_t dset = H5Dcreate2(file, "data", H5T_STD_I32LE, space,
+                             H5P_DEFAULT, dcpl, H5P_DEFAULT);
+
+    int32_t vals[4] = {10, 20, 30, 40};
+    H5Dwrite(dset, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, vals);
+
+    /* Attribute must be created before SWMR mode */
+    hid_t ascalar = H5Screate(H5S_SCALAR);
+    hid_t attr = H5Acreate2(dset, "scale", H5T_NATIVE_INT32, ascalar,
+                             H5P_DEFAULT, H5P_DEFAULT);
+    int32_t scale = 100;
+    H5Awrite(attr, H5T_NATIVE_INT32, &scale);
+    H5Aclose(attr);
+    H5Sclose(ascalar);
+
+    H5Dclose(dset);
+    H5Pclose(dcpl);
+    H5Sclose(space);
+    H5Fclose(file);
+
+    /* Phase 2: Reopen in SWMR write mode and extend dataset */
+    file = H5Fopen(filename, H5F_ACC_RDWR | H5F_ACC_SWMR_WRITE, fapl);
+    dset = H5Dopen2(file, "data", H5P_DEFAULT);
+
+    hsize_t new_dims[1] = {8};
+    H5Dset_extent(dset, new_dims);
+
+    /* Write to the extended portion [4..8) */
+    hid_t fspace = H5Dget_space(dset);
+    hsize_t start[1] = {4};
+    hsize_t count[1] = {4};
+    H5Sselect_hyperslab(fspace, H5S_SELECT_SET, start, NULL, count, NULL);
+
+    hid_t mspace = H5Screate_simple(1, count, NULL);
+    int32_t new_vals[4] = {50, 60, 70, 80};
+    H5Dwrite(dset, H5T_NATIVE_INT, mspace, fspace, H5P_DEFAULT, new_vals);
+
+    H5Sclose(mspace);
+    H5Sclose(fspace);
+    H5Dclose(dset);
+    H5Fclose(file);  /* Clean close → SWMR flags cleared */
+    H5Pclose(fapl);
+    printf("Created %s\n", filename);
+}
+
 int main(void)
 {
     create_simple_contiguous("simple_contiguous_v2.h5");
@@ -1098,5 +1354,10 @@ int main(void)
     create_filtered_fheap("filtered_fheap.h5");
     create_btree_v2_deep("btree_v2_deep.h5");
     create_btree_v2_filtered("btree_v2_filtered.h5");
+    create_fheap_indirect("fheap_indirect.h5");
+    create_nil_messages("nil_messages.h5");
+    create_gcol_free_space("gcol_free_space.h5");
+    create_compound_complex_members("compound_complex_members.h5");
+    create_swmr("swmr.h5");
     return 0;
 }
