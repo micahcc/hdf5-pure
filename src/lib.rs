@@ -37,6 +37,7 @@ pub mod layout;
 pub mod link;
 pub mod object_header;
 pub mod superblock;
+pub mod writer;
 
 // Re-export the main public types at crate root.
 pub use dataspace::Dataspace;
