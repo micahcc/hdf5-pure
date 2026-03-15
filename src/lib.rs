@@ -6,7 +6,7 @@
 //! # Quick Start
 //!
 //! ```no_run
-//! use hdf5_reader::File;
+//! use hdf5_pure::File;
 //!
 //! // From a file on disk
 //! let file = File::open("data.h5").unwrap();

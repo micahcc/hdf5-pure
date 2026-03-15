@@ -1,4 +1,4 @@
-use hdf5_reader::{Attribute, DataLayout, Dataspace, Dataset, Datatype, File, Group, Node};
+use hdf5_pure::{Attribute, DataLayout, Dataspace, Dataset, Datatype, File, Group, Node};
 use std::env;
 use std::process;
 
@@ -55,7 +55,7 @@ fn indent(level: usize) -> String {
     "  ".repeat(level)
 }
 
-fn print_group<R: hdf5_reader::ReadAt + ?Sized>(file: &File<R>, group: &Group<'_, R>, name: &str, level: usize) {
+fn print_group<R: hdf5_pure::ReadAt + ?Sized>(file: &File<R>, group: &Group<'_, R>, name: &str, level: usize) {
     let pre = indent(level);
     println!("{}GROUP \"{}\" {{", pre, name);
 
@@ -94,7 +94,7 @@ fn format_path(parent: &str, child: &str) -> String {
     }
 }
 
-fn print_dataset<R: hdf5_reader::ReadAt + ?Sized>(ds: &Dataset<'_, R>, name: &str, level: usize) {
+fn print_dataset<R: hdf5_pure::ReadAt + ?Sized>(ds: &Dataset<'_, R>, name: &str, level: usize) {
     let pre = indent(level);
     println!("{}DATASET \"{}\" {{", pre, name);
 
@@ -201,9 +201,9 @@ fn format_datatype(dt: &Datatype) -> String {
         } => {
             let sign = if *signed { "I" } else { "U" };
             let order = match byte_order {
-                hdf5_reader::datatype::ByteOrder::LittleEndian => "LE",
-                hdf5_reader::datatype::ByteOrder::BigEndian => "BE",
-                hdf5_reader::datatype::ByteOrder::Vax => "VAX",
+                hdf5_pure::datatype::ByteOrder::LittleEndian => "LE",
+                hdf5_pure::datatype::ByteOrder::BigEndian => "BE",
+                hdf5_pure::datatype::ByteOrder::Vax => "VAX",
             };
             format!("H5T_STD_{}{}{}", sign, size * 8, order)
         }
@@ -211,9 +211,9 @@ fn format_datatype(dt: &Datatype) -> String {
             size, byte_order, ..
         } => {
             let order = match byte_order {
-                hdf5_reader::datatype::ByteOrder::LittleEndian => "LE",
-                hdf5_reader::datatype::ByteOrder::BigEndian => "BE",
-                hdf5_reader::datatype::ByteOrder::Vax => "VAX",
+                hdf5_pure::datatype::ByteOrder::LittleEndian => "LE",
+                hdf5_pure::datatype::ByteOrder::BigEndian => "BE",
+                hdf5_pure::datatype::ByteOrder::Vax => "VAX",
             };
             format!("H5T_IEEE_F{}{}", size * 8, order)
         }
@@ -223,13 +223,13 @@ fn format_datatype(dt: &Datatype) -> String {
             char_set,
         } => {
             let pad = match padding {
-                hdf5_reader::datatype::StringPadding::NullTerminate => "NULLTERM",
-                hdf5_reader::datatype::StringPadding::NullPad => "NULLPAD",
-                hdf5_reader::datatype::StringPadding::SpacePad => "SPACEPAD",
+                hdf5_pure::datatype::StringPadding::NullTerminate => "NULLTERM",
+                hdf5_pure::datatype::StringPadding::NullPad => "NULLPAD",
+                hdf5_pure::datatype::StringPadding::SpacePad => "SPACEPAD",
             };
             let cs = match char_set {
-                hdf5_reader::datatype::CharacterSet::Ascii => "ASCII",
-                hdf5_reader::datatype::CharacterSet::Utf8 => "UTF8",
+                hdf5_pure::datatype::CharacterSet::Ascii => "ASCII",
+                hdf5_pure::datatype::CharacterSet::Utf8 => "UTF8",
             };
             format!("H5T_STRING {{ size={}; pad={}; cset={} }}", size, pad, cs)
         }
@@ -281,8 +281,8 @@ fn format_datatype(dt: &Datatype) -> String {
         Datatype::Opaque { size, tag } => format!("H5T_OPAQUE {{ size={}; tag=\"{}\" }}", size, tag),
         Datatype::BitField { size, .. } => format!("H5T_BITFIELD {{ size={} }}", size),
         Datatype::Reference { ref_type } => match ref_type {
-            hdf5_reader::datatype::ReferenceType::Object => "H5T_REFERENCE(OBJECT)".to_string(),
-            hdf5_reader::datatype::ReferenceType::DatasetRegion => {
+            hdf5_pure::datatype::ReferenceType::Object => "H5T_REFERENCE(OBJECT)".to_string(),
+            hdf5_pure::datatype::ReferenceType::DatasetRegion => {
                 "H5T_REFERENCE(REGION)".to_string()
             }
         },
@@ -350,7 +350,7 @@ fn format_layout(layout: &DataLayout) -> String {
     }
 }
 
-fn print_dataset_data<R: hdf5_reader::ReadAt + ?Sized>(ds: &Dataset<'_, R>, path: &str) {
+fn print_dataset_data<R: hdf5_pure::ReadAt + ?Sized>(ds: &Dataset<'_, R>, path: &str) {
     println!("DATASET \"{}\"", path);
 
     let dt = match ds.datatype() {
