@@ -35,6 +35,17 @@ impl File<[u8]> {
     }
 }
 
+impl<R: ReadAt> File<R> {
+    /// Open an HDF5 file from any `ReadAt` implementation.
+    pub fn from_reader(reader: R) -> Result<File<R>> {
+        let superblock = Superblock::parse(&reader, 0)?;
+        Ok(File {
+            reader: Box::new(reader),
+            superblock,
+        })
+    }
+}
+
 impl File<std::fs::File> {
     /// Open an HDF5 file from a filesystem path.
     pub fn open<P: AsRef<std::path::Path>>(path: P) -> Result<File<std::fs::File>> {
