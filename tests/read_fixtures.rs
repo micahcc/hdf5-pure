@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use hdf5_pure::Datatype;
-use hdf5_pure::File;
+use hdf5_io::Datatype;
+use hdf5_io::File;
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -15,7 +15,7 @@ fn fixture(name: &str) -> PathBuf {
 #[test]
 fn parse_superblock_v2() {
     let data = std::fs::read(fixture("simple_contiguous_v2.h5")).unwrap();
-    let sb = hdf5_pure::Superblock::parse(data.as_slice(), 0).unwrap();
+    let sb = hdf5_io::Superblock::parse(data.as_slice(), 0).unwrap();
     assert_eq!(sb.version, 2);
     assert_eq!(sb.size_of_offsets, 8);
     assert_eq!(sb.size_of_lengths, 8);
@@ -26,7 +26,7 @@ fn parse_superblock_v2() {
 #[test]
 fn parse_superblock_v3() {
     let data = std::fs::read(fixture("chunked_deflate_v3.h5")).unwrap();
-    let sb = hdf5_pure::Superblock::parse(data.as_slice(), 0).unwrap();
+    let sb = hdf5_io::Superblock::parse(data.as_slice(), 0).unwrap();
     assert_eq!(sb.version, 3);
     assert_eq!(sb.size_of_offsets, 8);
     assert_eq!(sb.size_of_lengths, 8);
@@ -171,14 +171,14 @@ fn open_by_path() {
     let file = File::open(fixture("nested_groups_v2.h5")).unwrap();
 
     match file.open_path("/group1/subgroup/temps").unwrap() {
-        hdf5_pure::Node::Dataset(ds) => {
+        hdf5_io::Node::Dataset(ds) => {
             assert_eq!(ds.shape().unwrap(), vec![3]);
         }
         _ => panic!("expected Dataset"),
     }
 
     match file.open_path("/group1").unwrap() {
-        hdf5_pure::Node::Group(_) => {}
+        hdf5_io::Node::Group(_) => {}
         _ => panic!("expected Group"),
     }
 }
@@ -473,7 +473,7 @@ fn read_vlen_string_metadata() {
             ..
         } => {
             assert!(is_string);
-            assert_eq!(*char_set, Some(hdf5_pure::datatype::CharacterSet::Utf8));
+            assert_eq!(*char_set, Some(hdf5_io::datatype::CharacterSet::Utf8));
         }
         other => panic!("expected VarLen, got {:?}", other),
     }
@@ -572,7 +572,7 @@ fn read_fill_value() {
 
 #[test]
 fn fill_value_old_parse() {
-    use hdf5_pure::FillValue;
+    use hdf5_io::FillValue;
 
     // Old fill value format: size(u32 LE) + raw bytes
     let data = [
@@ -843,7 +843,7 @@ fn read_attribute() {
 
 #[test]
 fn read_creation_order_links() {
-    let file = hdf5_pure::File::open("tests/fixtures/creation_order.h5").unwrap();
+    let file = hdf5_io::File::open("tests/fixtures/creation_order.h5").unwrap();
     let root = file.root_group().unwrap();
     let grp = root.group("ordered").unwrap();
 
@@ -864,7 +864,7 @@ fn read_creation_order_links() {
 
 #[test]
 fn read_creation_order_attributes() {
-    let file = hdf5_pure::File::open("tests/fixtures/creation_order.h5").unwrap();
+    let file = hdf5_io::File::open("tests/fixtures/creation_order.h5").unwrap();
     let root = file.root_group().unwrap();
     let grp = root.group("ordered").unwrap();
 
@@ -901,14 +901,14 @@ fn read_creation_order_attributes() {
 
 #[test]
 fn read_complex_dataset() {
-    let file = hdf5_pure::File::open("tests/fixtures/complex.h5").unwrap();
+    let file = hdf5_io::File::open("tests/fixtures/complex.h5").unwrap();
     let root = file.root_group().unwrap();
     let ds = root.dataset("complex_data").unwrap();
 
     // Check datatype: should be Complex with f64 base
     let dt = ds.datatype().unwrap();
     match &dt {
-        hdf5_pure::Datatype::Complex { size, base } => {
+        hdf5_io::Datatype::Complex { size, base } => {
             assert_eq!(*size, 16); // 2 * 8 bytes
             assert_eq!(base.element_size(), 8);
         }
@@ -942,7 +942,7 @@ fn read_complex_dataset() {
 
 #[test]
 fn read_nbit_dataset() {
-    let file = hdf5_pure::File::open("tests/fixtures/nbit.h5").unwrap();
+    let file = hdf5_io::File::open("tests/fixtures/nbit.h5").unwrap();
     let root = file.root_group().unwrap();
     let ds = root.dataset("data").unwrap();
 
@@ -960,7 +960,7 @@ fn read_nbit_dataset() {
 
 #[test]
 fn read_scaleoffset_dataset() {
-    let file = hdf5_pure::File::open("tests/fixtures/scaleoffset.h5").unwrap();
+    let file = hdf5_io::File::open("tests/fixtures/scaleoffset.h5").unwrap();
     let root = file.root_group().unwrap();
     let ds = root.dataset("data").unwrap();
 
@@ -978,7 +978,7 @@ fn read_scaleoffset_dataset() {
 
 #[test]
 fn read_filtered_fheap_links() {
-    let file = hdf5_pure::File::open("tests/fixtures/filtered_fheap.h5").unwrap();
+    let file = hdf5_io::File::open("tests/fixtures/filtered_fheap.h5").unwrap();
     let root = file.root_group().unwrap();
     let grp = root.group("filtered_group").unwrap();
 
@@ -1000,7 +1000,7 @@ fn read_filtered_fheap_links() {
 
 #[test]
 fn read_filtered_fheap_attributes() {
-    let file = hdf5_pure::File::open("tests/fixtures/filtered_fheap.h5").unwrap();
+    let file = hdf5_io::File::open("tests/fixtures/filtered_fheap.h5").unwrap();
     let root = file.root_group().unwrap();
     let grp = root.group("filtered_group").unwrap();
 
@@ -1211,7 +1211,7 @@ fn read_compound_complex_members_data() {
 #[test]
 fn read_swmr_superblock() {
     let data = std::fs::read(fixture("swmr.h5")).unwrap();
-    let sb = hdf5_pure::Superblock::parse(data.as_slice(), 0).unwrap();
+    let sb = hdf5_io::Superblock::parse(data.as_slice(), 0).unwrap();
     assert_eq!(sb.version, 3);
     assert_eq!(sb.size_of_offsets, 8);
     assert_eq!(sb.size_of_lengths, 8);

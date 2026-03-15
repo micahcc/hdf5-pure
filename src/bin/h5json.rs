@@ -3,14 +3,14 @@ use std::io::Write;
 use std::io::{self};
 use std::process;
 
-use hdf5_pure::Attribute;
-use hdf5_pure::DataLayout;
-use hdf5_pure::Dataset;
-use hdf5_pure::Dataspace;
-use hdf5_pure::Datatype;
-use hdf5_pure::File;
-use hdf5_pure::Group;
-use hdf5_pure::Node;
+use hdf5_io::Attribute;
+use hdf5_io::DataLayout;
+use hdf5_io::Dataset;
+use hdf5_io::Dataspace;
+use hdf5_io::Datatype;
+use hdf5_io::File;
+use hdf5_io::Group;
+use hdf5_io::Node;
 use serde_json::Map;
 use serde_json::Value;
 use serde_json::json;
@@ -81,7 +81,7 @@ fn main() {
     out.write_all(b"\n").unwrap();
 }
 
-fn group_to_json<R: hdf5_pure::ReadAt + ?Sized>(
+fn group_to_json<R: hdf5_io::ReadAt + ?Sized>(
     file: &File<R>,
     group: &Group<'_, R>,
     path: &str,
@@ -139,7 +139,7 @@ fn group_to_json<R: hdf5_pure::ReadAt + ?Sized>(
     Value::Object(obj)
 }
 
-fn dataset_to_json<R: hdf5_pure::ReadAt + ?Sized>(
+fn dataset_to_json<R: hdf5_io::ReadAt + ?Sized>(
     ds: &Dataset<'_, R>,
     _path: &str,
     header_only: bool,
@@ -420,13 +420,13 @@ fn datatype_to_json(dt: &Datatype) -> Value {
                 "class": "string",
                 "size": size,
                 "padding": match padding {
-                    hdf5_pure::datatype::StringPadding::NullTerminate => "nullterm",
-                    hdf5_pure::datatype::StringPadding::NullPad => "nullpad",
-                    hdf5_pure::datatype::StringPadding::SpacePad => "spacepad",
+                    hdf5_io::datatype::StringPadding::NullTerminate => "nullterm",
+                    hdf5_io::datatype::StringPadding::NullPad => "nullpad",
+                    hdf5_io::datatype::StringPadding::SpacePad => "spacepad",
                 },
                 "charset": match char_set {
-                    hdf5_pure::datatype::CharacterSet::Ascii => "ascii",
-                    hdf5_pure::datatype::CharacterSet::Utf8 => "utf-8",
+                    hdf5_io::datatype::CharacterSet::Ascii => "ascii",
+                    hdf5_io::datatype::CharacterSet::Utf8 => "utf-8",
                 },
             })
         }
@@ -491,8 +491,8 @@ fn datatype_to_json(dt: &Datatype) -> Value {
             json!({
                 "class": "reference",
                 "ref_type": match ref_type {
-                    hdf5_pure::datatype::ReferenceType::Object => "object",
-                    hdf5_pure::datatype::ReferenceType::DatasetRegion => "region",
+                    hdf5_io::datatype::ReferenceType::Object => "object",
+                    hdf5_io::datatype::ReferenceType::DatasetRegion => "region",
                 },
             })
         }
@@ -560,11 +560,11 @@ fn layout_to_json(layout: &DataLayout) -> Value {
     }
 }
 
-fn order_str(order: &hdf5_pure::datatype::ByteOrder) -> &'static str {
+fn order_str(order: &hdf5_io::datatype::ByteOrder) -> &'static str {
     match order {
-        hdf5_pure::datatype::ByteOrder::LittleEndian => "LE",
-        hdf5_pure::datatype::ByteOrder::BigEndian => "BE",
-        hdf5_pure::datatype::ByteOrder::Vax => "VAX",
+        hdf5_io::datatype::ByteOrder::LittleEndian => "LE",
+        hdf5_io::datatype::ByteOrder::BigEndian => "BE",
+        hdf5_io::datatype::ByteOrder::Vax => "VAX",
     }
 }
 
