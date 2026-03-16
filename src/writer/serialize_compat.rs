@@ -11,6 +11,7 @@ use crate::writer::encode::compat_dataset_chunk_size;
 use crate::writer::encode::compat_group_chunk_size;
 use crate::writer::encode::encode_attribute;
 use crate::writer::encode::encode_attribute_info;
+use crate::writer::encode::encode_attribute_info_addrs;
 use crate::writer::encode::encode_attribute_shared;
 use crate::writer::encode::encode_chunked_layout;
 use crate::writer::encode::encode_chunked_layout_v3;
@@ -25,12 +26,13 @@ use crate::writer::encode::encode_group_info;
 use crate::writer::encode::encode_link;
 use crate::writer::encode::encode_link_info;
 use crate::writer::encode::encode_object_header;
+use crate::writer::encode::encode_object_header_with_phase_change;
 use crate::writer::encode::encode_superblock_versioned;
 use crate::writer::encode::ohdr_overhead;
 use crate::writer::file_writer::WriteOptions;
 use crate::writer::group_node::GroupNode;
-use crate::writer::types::ChunkFilter;
 use crate::writer::types::ChildNode;
+use crate::writer::types::ChunkFilter;
 use crate::writer::types::StorageLayout;
 use crate::writer::write_filters::apply_filters_forward;
 
@@ -112,16 +114,28 @@ pub(crate) fn write_tree_compat(
         let start = meta_addr as usize;
         buf[start..start + ohdr_bytes.len()].copy_from_slice(&ohdr_bytes);
 
-        // Write chunk index structure (FixedArray, etc.) if present.
+        // Write index/meta structures placed right after the OHDR.
         if objects[i].index_meta_size > 0 {
+            let index_addr = meta_addr + objects[i].ohdr_size as u64;
+            if let ObjectKind::Group(ref g) = objects[i].kind {
+                if let Some(ref storage) = g.dense_attr_storage {
+                    let dense_bytes = crate::writer::dense_attrs::encode_dense_attr_structures(
+                        storage, index_addr,
+                    )?;
+                    let istart = index_addr as usize;
+                    buf[istart..istart + dense_bytes.len()].copy_from_slice(&dense_bytes);
+                }
+            }
             if let ObjectKind::Dataset(ref d) = objects[i].kind {
                 if let Some(ref ci) = d.chunked_info {
-                    let index_addr = meta_addr + objects[i].ohdr_size as u64;
-                    let index_bytes =
-                        encode_chunk_index(ci, index_addr, data_addr, objects[i].btree_v2_nodes_start)?;
+                    let index_bytes = encode_chunk_index(
+                        ci,
+                        index_addr,
+                        data_addr,
+                        objects[i].btree_v2_nodes_start,
+                    )?;
                     let istart = index_addr as usize;
-                    buf[istart..istart + index_bytes.len()]
-                        .copy_from_slice(&index_bytes);
+                    buf[istart..istart + index_bytes.len()].copy_from_slice(&index_bytes);
                 }
             }
         }
@@ -134,20 +148,29 @@ pub(crate) fn write_tree_compat(
                     // Rewrite the heap IDs with correct GCOL address.
                     let heap_id_bytes = vlen_elems.len() * 16;
                     let gcol_addr = data_addr + heap_id_bytes as u64;
-                    let is_string = matches!(d.datatype,
-                        crate::datatype::Datatype::VarLen { is_string: true, .. });
+                    let is_string = matches!(
+                        d.datatype,
+                        crate::datatype::Datatype::VarLen {
+                            is_string: true,
+                            ..
+                        }
+                    );
                     let gcol_order = if is_string {
                         vlen_string_gcol_order(vlen_elems.len())
                     } else {
                         (0..vlen_elems.len()).collect()
                     };
                     let base_elem_size = match &d.datatype {
-                        crate::datatype::Datatype::VarLen { element_type, .. } =>
-                            element_type.element_size() as usize,
+                        crate::datatype::Datatype::VarLen { element_type, .. } => {
+                            element_type.element_size() as usize
+                        }
                         _ => 1,
                     };
                     let heap_ids = build_vlen_heap_ids_compat(
-                        vlen_elems, gcol_addr, &gcol_order, base_elem_size,
+                        vlen_elems,
+                        gcol_addr,
+                        &gcol_order,
+                        base_elem_size,
                     );
                     buf[ds..ds + heap_ids.len()].copy_from_slice(&heap_ids);
                     // GCOL bytes are already in data[heap_id_bytes..]
@@ -173,23 +196,21 @@ pub(crate) fn write_tree_compat(
                             chunk_addrs.push(data_addr + offset);
                             offset += part.len() as u64;
                         }
-                        let unfilt_chunk_bytes: u64 =
-                            ci.chunk_dims_with_elem.iter().product();
+                        let unfilt_chunk_bytes: u64 = ci.chunk_dims_with_elem.iter().product();
                         let has_filters = !ci.filters.is_empty();
                         let (btree_type, rec_size, chunk_size_len) =
                             btree_v2_record_info(ci.ndims, has_filters, unfilt_chunk_bytes);
-                        let mut filt_sizes: Vec<u64> = ci
-                            .chunk_data_parts
-                            .iter()
-                            .map(|p| p.len() as u64)
-                            .collect();
+                        let mut filt_sizes: Vec<u64> =
+                            ci.chunk_data_parts.iter().map(|p| p.len() as u64).collect();
                         if filt_sizes.is_empty() {
                             filt_sizes = vec![0; chunk_addrs.len()];
                         }
                         let node_size = 2048usize;
                         let nodes_start = objects[i].btree_v2_nodes_start as usize;
                         let layout = compute_btree_v2_layout(
-                            chunk_addrs.len(), rec_size as usize, node_size,
+                            chunk_addrs.len(),
+                            rec_size as usize,
+                            node_size,
                         );
                         write_btree_v2_nodes(
                             &mut buf,
@@ -245,6 +266,13 @@ enum ObjectKind {
 
 struct GroupRef {
     attributes: Vec<crate::writer::types::AttrData>,
+    /// Non-default attribute phase change thresholds.
+    attr_phase_change: Option<(u16, u16)>,
+    /// Dense attribute storage info (if attributes exceed compact threshold).
+    dense_attr_storage: Option<crate::writer::dense_attrs::DenseAttrStorage>,
+    /// Total byte size of the dense attribute structures placed after this OHDR.
+    #[allow(dead_code)]
+    dense_attr_meta_size: usize,
 }
 
 struct DatasetRef {
@@ -304,10 +332,30 @@ fn flatten_tree(
 ) -> Result<usize> {
     let my_index = objects.len();
 
+    // Determine if dense attribute storage is needed.
+    let use_dense = if let Some((max_compact, _)) = group.attr_phase_change {
+        group.attributes.len() > max_compact as usize
+    } else {
+        false
+    };
+
+    let (dense_storage, dense_meta_size) = if use_dense {
+        let cloned_attrs: Vec<_> = group.attributes.iter().map(clone_attr).collect();
+        let storage = crate::writer::dense_attrs::compute_dense_attr_storage(&cloned_attrs)?;
+        let sizes = crate::writer::dense_attrs::compute_dense_attr_sizes(&storage);
+        let meta_size = sizes.total();
+        (Some(storage), meta_size)
+    } else {
+        (None, 0)
+    };
+
     // Reserve slot for this group.
     objects.push(ObjectInfo {
         kind: ObjectKind::Group(GroupRef {
             attributes: group.attributes.iter().map(clone_attr).collect(),
+            attr_phase_change: group.attr_phase_change,
+            dense_attr_storage: dense_storage,
+            dense_attr_meta_size: dense_meta_size,
         }),
         ohdr_size: 0,
         meta_addr: 0,
@@ -383,20 +431,73 @@ fn flatten_tree(
     }
 
     // Compute group OHDR size using dummy child addresses.
-    let messages = build_group_messages_dummy(&child_indices, &group.attributes, opts)?;
+    let dense_attrs = if let ObjectKind::Group(ref g) = objects[my_index].kind {
+        g.dense_attr_storage.is_some()
+    } else {
+        false
+    };
+    let attrs_for_dummy = if dense_attrs {
+        &[] as &[crate::writer::types::AttrData]
+    } else {
+        &group.attributes[..]
+    };
+    let messages = build_group_messages_dummy(&child_indices, attrs_for_dummy, opts, dense_attrs)?;
     let real_msg_bytes: usize = messages.iter().map(|(_, b, _)| 4 + b.len()).sum();
     let target = compat_group_chunk_size(4, 8); // C library defaults: est_num_entries=4, est_name_len=8
-    let target_chunk = if target > real_msg_bytes {
-        Some(target)
+
+    // For dense attribute groups, the C library's OHDR allocation reflects the history:
+    // 1. Initial chunk = max(base_chunk, base_msgs + max_compact inline attrs)
+    // 2. Dense conversion extends chunk by AttrInfo message size (22)
+    // We replicate this to match the C library's final chunk_size.
+    let chunk_for_overhead = if dense_attrs {
+        let max_compact = group
+            .attr_phase_change
+            .map(|(mc, _)| mc as usize)
+            .unwrap_or(0);
+        let base_msgs: usize = messages
+            .iter()
+            .filter(|(t, _, _)| *t != MessageType::AttributeInfo.as_u8())
+            .map(|(_, b, _)| 4 + b.len())
+            .sum();
+        let inline_attr_bytes: usize = group
+            .attributes
+            .iter()
+            .take(max_compact)
+            .map(|a| 4 + encode_attribute(a).map(|b| b.len()).unwrap_or(0))
+            .sum();
+        let attr_info_size = messages
+            .iter()
+            .find(|(t, _, _)| *t == MessageType::AttributeInfo.as_u8())
+            .map(|(_, b, _)| 4 + b.len())
+            .unwrap_or(22);
+        target.max(base_msgs + inline_attr_bytes) + attr_info_size
+    } else {
+        let target_chunk = if target > real_msg_bytes {
+            Some(target)
+        } else {
+            None
+        };
+        target_chunk.unwrap_or(real_msg_bytes)
+    };
+
+    // For groups with phase change, the OHDR prefix is 4 bytes larger.
+    let phase_change_extra = if group.attr_phase_change.is_some() {
+        4
+    } else {
+        0
+    };
+    let ohdr_size = ohdr_overhead(chunk_for_overhead, opts) + phase_change_extra;
+
+    let target_chunk = if chunk_for_overhead > real_msg_bytes {
+        Some(chunk_for_overhead)
     } else {
         None
     };
-    let chunk_for_overhead = target_chunk.unwrap_or(real_msg_bytes);
-    let ohdr_size = ohdr_overhead(chunk_for_overhead, opts);
 
     objects[my_index].child_indices = child_indices;
     objects[my_index].ohdr_size = ohdr_size;
     objects[my_index].target_chunk_size = target_chunk;
+    objects[my_index].index_meta_size = dense_meta_size;
 
     Ok(my_index)
 }
@@ -420,8 +521,13 @@ fn flatten_dataset(
         (vec![], None)
     } else if let Some(ref vlen_elems) = ds.vlen_elements {
         // Determine GCOL ordering based on vlen type.
-        let is_string = matches!(ds.datatype,
-            crate::datatype::Datatype::VarLen { is_string: true, .. });
+        let is_string = matches!(
+            ds.datatype,
+            crate::datatype::Datatype::VarLen {
+                is_string: true,
+                ..
+            }
+        );
         let gcol_order = if is_string {
             vlen_string_gcol_order(vlen_elems.len())
         } else {
@@ -714,11 +820,32 @@ fn encode_object_final(
                 let child_addr = objects[*child_idx].meta_addr;
                 messages.push((MessageType::Link.as_u8(), encode_link(name, child_addr), 0));
             }
-            for attr in &g.attributes {
-                messages.push((MessageType::Attribute.as_u8(), encode_attribute(attr)?, 0));
+            if g.dense_attr_storage.is_some() {
+                // Dense attribute storage: AttrInfo pointing to FRHP + BTHD
+                // which are placed right after this OHDR.
+                let frhp_addr = obj.meta_addr + obj.ohdr_size as u64;
+                let sizes = crate::writer::dense_attrs::compute_dense_attr_sizes(
+                    g.dense_attr_storage.as_ref().unwrap(),
+                );
+                let bthd_addr = frhp_addr + sizes.frhp_size as u64;
+                let attr_info_body = encode_attribute_info_addrs(frhp_addr, bthd_addr);
+                messages.push((
+                    MessageType::AttributeInfo.as_u8(),
+                    attr_info_body,
+                    0x04, // not-shareable
+                ));
+            } else {
+                for attr in &g.attributes {
+                    messages.push((MessageType::Attribute.as_u8(), encode_attribute(attr)?, 0));
+                }
             }
 
-            encode_object_header(&messages, opts, target_chunk)
+            encode_object_header_with_phase_change(
+                &messages,
+                opts,
+                target_chunk,
+                g.attr_phase_change,
+            )
         }
         ObjectKind::Dataset(d) => {
             use crate::writer::types::SpaceAllocTime;
@@ -770,10 +897,7 @@ fn encode_object_final(
                     obj.data_addr
                 };
                 let layout = if ci.layout_version == 3 {
-                    encode_chunked_layout_v3(
-                        &ci.chunk_dims_with_elem,
-                        chunk_index_addr,
-                    )
+                    encode_chunked_layout_v3(&ci.chunk_dims_with_elem, chunk_index_addr)
                 } else {
                     encode_chunked_layout(
                         &ci.chunk_dims_with_elem,
@@ -803,10 +927,7 @@ fn encode_object_final(
                 } else {
                     (obj.data_addr, obj.data.len() as u64)
                 };
-                (
-                    encode_contiguous_layout(data_addr, data_size),
-                    None,
-                )
+                (encode_contiguous_layout(data_addr, data_size), None)
             };
 
             let mut attr_bodies: Vec<Vec<u8>> = Vec::new();
@@ -831,13 +952,16 @@ fn encode_object_final(
             if let Some(fb) = filter_body {
                 messages.push((MessageType::FilterPipeline.as_u8(), fb, 0x01));
             }
-            let layout_msg_flags =
-                if d.chunked_info.as_ref().is_some_and(|ci| ci.early_alloc) {
-                    0x01 // constant
-                } else {
-                    0x00
-                };
-            messages.push((MessageType::DataLayout.as_u8(), layout_body, layout_msg_flags));
+            let layout_msg_flags = if d.chunked_info.as_ref().is_some_and(|ci| ci.early_alloc) {
+                0x01 // constant
+            } else {
+                0x00
+            };
+            messages.push((
+                MessageType::DataLayout.as_u8(),
+                layout_body,
+                layout_msg_flags,
+            ));
             if !attr_bodies.is_empty() {
                 messages.push((
                     MessageType::AttributeInfo.as_u8(),
@@ -866,8 +990,11 @@ fn encode_object_final(
             cont_body.extend_from_slice(&ochk_addr.to_le_bytes());
             cont_body.extend_from_slice(&ochk_size.to_le_bytes());
 
-            let messages: Vec<OhdrMsg> =
-                vec![(MessageType::ObjectHeaderContinuation.as_u8(), cont_body, 0x00)];
+            let messages: Vec<OhdrMsg> = vec![(
+                MessageType::ObjectHeaderContinuation.as_u8(),
+                cont_body,
+                0x00,
+            )];
 
             encode_object_header(&messages, opts, target_chunk)
         }
@@ -903,6 +1030,7 @@ fn build_group_messages_dummy(
     child_indices: &[(String, usize)],
     attributes: &[crate::writer::types::AttrData],
     _opts: &WriteOptions,
+    dense_attrs: bool,
 ) -> Result<Vec<OhdrMsg>> {
     let mut messages: Vec<OhdrMsg> = Vec::new();
     messages.push((MessageType::LinkInfo.as_u8(), encode_link_info(), 0));
@@ -910,8 +1038,17 @@ fn build_group_messages_dummy(
     for (name, _) in child_indices {
         messages.push((MessageType::Link.as_u8(), encode_link(name, 0xDEAD_0000), 0));
     }
-    for attr in attributes {
-        messages.push((MessageType::Attribute.as_u8(), encode_attribute(attr)?, 0));
+    if dense_attrs {
+        // Dense attributes: include AttrInfo message with dummy addresses.
+        messages.push((
+            MessageType::AttributeInfo.as_u8(),
+            encode_attribute_info(),
+            0x04,
+        ));
+    } else {
+        for attr in attributes {
+            messages.push((MessageType::Attribute.as_u8(), encode_attribute(attr)?, 0));
+        }
     }
     Ok(messages)
 }
@@ -975,10 +1112,7 @@ fn build_dataset_messages_dummy_chunked(
     let fv_body = encode_fill_value_msg_alloc(&ds.fill_value, alloc_time);
 
     let layout_body = if ci.layout_version == 3 {
-        encode_chunked_layout_v3(
-            &ci.chunk_dims_with_elem,
-            0xDEAD_BEEF_0000_0000,
-        )
+        encode_chunked_layout_v3(&ci.chunk_dims_with_elem, 0xDEAD_BEEF_0000_0000)
     } else {
         encode_chunked_layout(
             &ci.chunk_dims_with_elem,
@@ -1009,7 +1143,11 @@ fn build_dataset_messages_dummy_chunked(
         messages.push((MessageType::FilterPipeline.as_u8(), fb, 0x01));
     }
     let layout_msg_flags = if ci.early_alloc { 0x01 } else { 0x00 };
-    messages.push((MessageType::DataLayout.as_u8(), layout_body, layout_msg_flags));
+    messages.push((
+        MessageType::DataLayout.as_u8(),
+        layout_body,
+        layout_msg_flags,
+    ));
     if !attr_bodies.is_empty() {
         messages.push((
             MessageType::AttributeInfo.as_u8(),
@@ -1093,7 +1231,11 @@ fn encode_chunk_index(
 
     // BTree v1 (layout version 3)
     if ci.layout_version == 3 {
-        return Ok(encode_btree_v1_chunk_node(ci, &chunk_addrs, &filtered_sizes));
+        return Ok(encode_btree_v1_chunk_node(
+            ci,
+            &chunk_addrs,
+            &filtered_sizes,
+        ));
     }
 
     match ci.index_type_id {
@@ -1242,7 +1384,11 @@ struct EaDblkSpec {
 /// The extensible array uses even-indexed super blocks for element mapping:
 ///   sblk_idx = 2 * floor(log2(loc_idx / min + 1))
 /// The sblk info table (all indices) determines nelmts and block_off.
-fn compute_ea_dblk_specs(n_chunks: usize, idx_blk_elmts: u32, data_blk_min_elmts: u32) -> Vec<EaDblkSpec> {
+fn compute_ea_dblk_specs(
+    n_chunks: usize,
+    idx_blk_elmts: u32,
+    data_blk_min_elmts: u32,
+) -> Vec<EaDblkSpec> {
     if n_chunks as u32 <= idx_blk_elmts {
         return vec![];
     }
@@ -1265,7 +1411,10 @@ fn compute_ea_dblk_specs(n_chunks: usize, idx_blk_elmts: u32, data_blk_min_elmts
             // Only even-indexed super blocks are used for element mapping.
             for d in 0..ndblks {
                 let block_off = sblk_start + d * dblk_nelmts;
-                dblks.push(EaDblkSpec { nelmts: dblk_nelmts, block_off });
+                dblks.push(EaDblkSpec {
+                    nelmts: dblk_nelmts,
+                    block_off,
+                });
                 remaining -= dblk_nelmts as i64;
                 if remaining <= 0 {
                     break;
@@ -1362,9 +1511,8 @@ fn encode_ext_array_index(
 
     // Compute sizes for address calculation.
     let hdr_size = 72usize;
-    let iblk_size = 14 + idx_blk_elmts as usize * entry_size as usize
-        + (ndblk_addrs + nsblk_addrs) * 8
-        + 4;
+    let iblk_size =
+        14 + idx_blk_elmts as usize * entry_size as usize + (ndblk_addrs + nsblk_addrs) * 8 + 4;
 
     // Compute EADB sizes and addresses.
     let mut dblk_addrs = Vec::with_capacity(n_dblks);
@@ -1372,8 +1520,7 @@ fn encode_ext_array_index(
     let mut total_dblk_disk_size: u64 = 0;
     for spec in &dblk_specs {
         dblk_addrs.push(index_addr + dblk_offset);
-        let dblk_disk_size =
-            14 + block_off_size + spec.nelmts as usize * entry_size as usize + 4;
+        let dblk_disk_size = 14 + block_off_size + spec.nelmts as usize * entry_size as usize + 4;
         dblk_offset += dblk_disk_size as u64;
         total_dblk_disk_size += dblk_disk_size as u64;
     }
@@ -1571,7 +1718,11 @@ fn align_up(pos: usize, alignment: usize) -> usize {
 /// Returns (btree_type, rec_size, chunk_size_len).
 /// Non-filtered: type 10, rec = addr(8) + ndims*scaled(8).
 /// Filtered: type 11, rec = addr(8) + chunk_nbytes(chunk_size_len) + filter_mask(4) + ndims*scaled(8).
-fn btree_v2_record_info(ndims: usize, has_filters: bool, unfilt_chunk_bytes: u64) -> (u8, u16, usize) {
+fn btree_v2_record_info(
+    ndims: usize,
+    has_filters: bool,
+    unfilt_chunk_bytes: u64,
+) -> (u8, u16, usize) {
     let scaled_enc: usize = 8; // unlimited dims → 8 bytes per scaled offset
     if has_filters {
         // chunk_size_len: empirically matches C library with formula
@@ -1805,11 +1956,7 @@ fn insert_into_tree(
 }
 
 /// Redistribute records between leaves[idx] and leaves[idx+1].
-fn redistribute2(
-    leaves: &mut Vec<Vec<usize>>,
-    internal_recs: &mut Vec<usize>,
-    idx: usize,
-) {
+fn redistribute2(leaves: &mut Vec<Vec<usize>>, internal_recs: &mut Vec<usize>, idx: usize) {
     let left_n = leaves[idx].len();
     let right_n = leaves[idx + 1].len();
 
@@ -1842,11 +1989,7 @@ fn redistribute2(
 }
 
 /// Split leaves[idx] into two, promoting middle record to internal.
-fn split1(
-    leaves: &mut Vec<Vec<usize>>,
-    internal_recs: &mut Vec<usize>,
-    idx: usize,
-) {
+fn split1(leaves: &mut Vec<Vec<usize>>, internal_recs: &mut Vec<usize>, idx: usize) {
     let old = &leaves[idx];
     let mid = old.len() / 2;
     let new_leaf = old[mid + 1..].to_vec();
@@ -1920,7 +2063,15 @@ fn write_btree_v2_nodes(
         let addrs: Vec<u64> = leaf_recs.iter().map(|&r| chunk_addrs[r]).collect();
         let coords: Vec<Vec<u64>> = leaf_recs.iter().map(|&r| chunk_coords[r].clone()).collect();
         let fsizes: Vec<u64> = leaf_recs.iter().map(|&r| filtered_sizes[r]).collect();
-        let leaf = encode_btree_v2_leaf(&addrs, &coords, &fsizes, ndims, btree_type, chunk_size_len, node_size);
+        let leaf = encode_btree_v2_leaf(
+            &addrs,
+            &coords,
+            &fsizes,
+            ndims,
+            btree_type,
+            chunk_size_len,
+            node_size,
+        );
         let addr = leaf_addrs[li];
         buf[addr..addr + node_size].copy_from_slice(&leaf);
     }

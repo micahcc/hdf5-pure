@@ -1,6 +1,7 @@
 mod chunk_index;
 mod chunk_util;
 mod dataset_node;
+mod dense_attrs;
 mod encode;
 mod file_writer;
 mod gcol;

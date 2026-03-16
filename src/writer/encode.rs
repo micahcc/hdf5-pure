@@ -106,15 +106,98 @@ pub(crate) fn encode_object_header(
     Ok(buf)
 }
 
+/// Encode an object header with optional non-default attribute phase change values.
+///
+/// When `phase_change` is Some, flag 0x10 is set and the (max_compact, min_dense)
+/// values are inserted into the header prefix before the chunk size field.
+pub(crate) fn encode_object_header_with_phase_change(
+    messages: &[OhdrMsg],
+    opts: &WriteOptions,
+    target_chunk_size: Option<usize>,
+    phase_change: Option<(u16, u16)>,
+) -> Result<Vec<u8>> {
+    if phase_change.is_none() {
+        return encode_object_header(messages, opts, target_chunk_size);
+    }
+    let (max_compact, min_dense) = phase_change.unwrap();
+
+    let real_msg_bytes: usize = messages.iter().map(|(_, b, _)| 4 + b.len()).sum();
+    let total_msg_bytes = if let Some(target) = target_chunk_size {
+        assert!(target >= real_msg_bytes);
+        target
+    } else {
+        real_msg_bytes
+    };
+
+    // Compute flags and prefix. Phase change adds 4 bytes to the prefix.
+    let ts_extra = if opts.timestamps.is_some() { 16 } else { 0 };
+    let base_flags: u8 = if opts.timestamps.is_some() { 0x20 } else { 0 };
+    let flags = base_flags | 0x10 | // phase change flag
+        if total_msg_bytes <= 0xFF { 0x00 }
+        else if total_msg_bytes <= 0xFFFF { 0x01 }
+        else { 0x02 };
+
+    let cs_size = match flags & 0x03 {
+        0x00 => 1,
+        0x01 => 2,
+        _ => 4,
+    };
+    let prefix_size = 6 + ts_extra + 4 + cs_size; // 4 extra for phase change
+
+    let mut buf = Vec::with_capacity(prefix_size + total_msg_bytes + 4);
+
+    buf.extend_from_slice(b"OHDR");
+    buf.push(2);
+    buf.push(flags);
+
+    if let Some((at, mt, ct, bt)) = opts.timestamps {
+        buf.extend_from_slice(&at.to_le_bytes());
+        buf.extend_from_slice(&mt.to_le_bytes());
+        buf.extend_from_slice(&ct.to_le_bytes());
+        buf.extend_from_slice(&bt.to_le_bytes());
+    }
+
+    // Phase change values: max_compact(2) + min_dense(2)
+    buf.extend_from_slice(&max_compact.to_le_bytes());
+    buf.extend_from_slice(&min_dense.to_le_bytes());
+
+    match flags & 0x03 {
+        0x00 => buf.push(total_msg_bytes as u8),
+        0x01 => buf.extend_from_slice(&(total_msg_bytes as u16).to_le_bytes()),
+        0x02 => buf.extend_from_slice(&(total_msg_bytes as u32).to_le_bytes()),
+        _ => unreachable!(),
+    }
+
+    for (type_id, body, msg_flags) in messages {
+        buf.push(*type_id);
+        buf.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        buf.push(*msg_flags);
+        buf.extend_from_slice(body);
+    }
+
+    // Pad with NIL message or gap if needed.
+    let nil_bytes = total_msg_bytes - real_msg_bytes;
+    if nil_bytes >= 4 {
+        let nil_body_len = nil_bytes - 4;
+        buf.push(0x00);
+        buf.extend_from_slice(&(nil_body_len as u16).to_le_bytes());
+        buf.push(0x00);
+        buf.resize(buf.len() + nil_body_len, 0);
+    } else if nil_bytes > 0 {
+        buf.resize(buf.len() + nil_bytes, 0);
+    }
+
+    let cksum = checksum::lookup3(&buf);
+    buf.extend_from_slice(&cksum.to_le_bytes());
+
+    Ok(buf)
+}
+
 pub(crate) fn encode_superblock(root_group_addr: u64, eof: u64) -> Vec<u8> {
     encode_superblock_versioned(root_group_addr, eof, 2)
 }
 
-pub(crate) fn encode_superblock_versioned(
-    root_group_addr: u64,
-    eof: u64,
-    version: u8,
-) -> Vec<u8> {
+pub(crate) fn encode_superblock_versioned(root_group_addr: u64, eof: u64, version: u8) -> Vec<u8> {
     let mut buf = Vec::with_capacity(SUPERBLOCK_SIZE);
     buf.extend_from_slice(&HDF5_SIGNATURE);
     buf.push(version);
@@ -435,13 +518,23 @@ pub(crate) fn encode_fill_value_msg_alloc(
     }
 }
 
-/// Encode Attribute Info message (type 0x15).
+/// Encode Attribute Info message (type 0x15) with UNDEF addresses.
 pub(crate) fn encode_attribute_info() -> Vec<u8> {
     let mut buf = Vec::with_capacity(18);
     buf.push(0); // version
     buf.push(0); // flags
     buf.extend_from_slice(&UNDEF_ADDR.to_le_bytes()); // fractal heap addr
     buf.extend_from_slice(&UNDEF_ADDR.to_le_bytes()); // btree name addr
+    buf
+}
+
+/// Encode Attribute Info message (type 0x15) with real fractal heap and B-tree addresses.
+pub(crate) fn encode_attribute_info_addrs(fheap_addr: u64, btree_name_addr: u64) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(18);
+    buf.push(0); // version
+    buf.push(0); // flags
+    buf.extend_from_slice(&fheap_addr.to_le_bytes());
+    buf.extend_from_slice(&btree_name_addr.to_le_bytes());
     buf
 }
 
@@ -464,10 +557,7 @@ pub(crate) fn encode_compact_layout(data: &[u8]) -> Vec<u8> {
 }
 
 /// Encode a layout v3 chunked message (B-tree v1 chunk indexing).
-pub(crate) fn encode_chunked_layout_v3(
-    chunk_dims_with_elem: &[u64],
-    btree_addr: u64,
-) -> Vec<u8> {
+pub(crate) fn encode_chunked_layout_v3(chunk_dims_with_elem: &[u64], btree_addr: u64) -> Vec<u8> {
     let dimensionality = chunk_dims_with_elem.len() as u8;
     let mut buf = vec![3, 2, dimensionality];
     buf.extend_from_slice(&btree_addr.to_le_bytes());
@@ -601,7 +691,10 @@ pub(crate) fn encode_attribute(attr: &AttrData) -> Result<Vec<u8>> {
 }
 
 /// Encode an attribute whose datatype is a shared reference to a committed type.
-pub(crate) fn encode_attribute_shared(attr: &AttrData, committed_type_addr: u64) -> Result<Vec<u8>> {
+pub(crate) fn encode_attribute_shared(
+    attr: &AttrData,
+    committed_type_addr: u64,
+) -> Result<Vec<u8>> {
     // Shared type reference: version(1)=2 + type(1)=2 + addr(8) = 10 bytes
     let mut dt_enc = Vec::with_capacity(10);
     dt_enc.push(2);

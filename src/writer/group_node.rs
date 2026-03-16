@@ -7,6 +7,10 @@ use crate::writer::types::ChildNode;
 pub struct GroupNode {
     pub(crate) children: Vec<(String, ChildNode)>,
     pub(crate) attributes: Vec<AttrData>,
+    /// Non-default attribute storage phase change thresholds.
+    /// (max_compact, min_dense) — when attribute count exceeds max_compact,
+    /// storage switches to dense (fractal heap + B-tree v2).
+    pub(crate) attr_phase_change: Option<(u16, u16)>,
 }
 
 impl GroupNode {
@@ -14,6 +18,7 @@ impl GroupNode {
         GroupNode {
             children: vec![],
             attributes: vec![],
+            attr_phase_change: None,
         }
     }
 
@@ -69,10 +74,8 @@ impl GroupNode {
 
     /// Add a committed (named) datatype to this group.
     pub fn commit_datatype(&mut self, name: &str, datatype: Datatype) {
-        self.children.push((
-            name.to_string(),
-            ChildNode::CommittedDatatype(datatype),
-        ));
+        self.children
+            .push((name.to_string(), ChildNode::CommittedDatatype(datatype)));
     }
 
     /// Add a dataset that references a committed (named) datatype.
@@ -89,11 +92,22 @@ impl GroupNode {
     ) -> &mut DatasetNode {
         let mut ds = DatasetNode::new(datatype, shape, data);
         ds.committed_type_name = Some(committed_type_name.to_string());
-        self.children.push((name.to_string(), ChildNode::Dataset(ds)));
+        self.children
+            .push((name.to_string(), ChildNode::Dataset(ds)));
         match &mut self.children.last_mut().unwrap().1 {
             ChildNode::Dataset(d) => d,
             _ => unreachable!(),
         }
+    }
+
+    /// Set non-default attribute storage phase change thresholds.
+    ///
+    /// When the number of attributes exceeds `max_compact`, storage switches
+    /// from compact (inline in OHDR) to dense (fractal heap + B-tree v2).
+    /// When it drops below `min_dense`, it switches back.
+    pub fn set_attr_phase_change(&mut self, max_compact: u16, min_dense: u16) -> &mut Self {
+        self.attr_phase_change = Some((max_compact, min_dense));
+        self
     }
 
     /// Add an attribute to this group.

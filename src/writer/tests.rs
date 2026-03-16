@@ -875,7 +875,10 @@ fn compat_simple_contiguous_v2() {
         &[],
         b"m/s\0\0".to_vec(),
     );
-    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/simple_contiguous_v2.h5");
+    assert_bytes_match(
+        &w.to_bytes().unwrap(),
+        "tests/fixtures/simple_contiguous_v2.h5",
+    );
 }
 
 #[test]
@@ -963,9 +966,18 @@ fn compat_enum() {
     let dt = crate::Datatype::Enum {
         base: Box::new(crate::Datatype::native_i8()),
         members: vec![
-            crate::datatype::EnumMember { name: "RED".to_string(), value: vec![0] },
-            crate::datatype::EnumMember { name: "GREEN".to_string(), value: vec![1] },
-            crate::datatype::EnumMember { name: "BLUE".to_string(), value: vec![2] },
+            crate::datatype::EnumMember {
+                name: "RED".to_string(),
+                value: vec![0],
+            },
+            crate::datatype::EnumMember {
+                name: "GREEN".to_string(),
+                value: vec![1],
+            },
+            crate::datatype::EnumMember {
+                name: "BLUE".to_string(),
+                value: vec![2],
+            },
         ],
     };
     let data = vec![0i8 as u8, 1, 2, 1, 0];
@@ -1006,9 +1018,18 @@ fn compat_compound_complex_members() {
     let enum_type = crate::Datatype::Enum {
         base: Box::new(crate::Datatype::native_i32()),
         members: vec![
-            crate::datatype::EnumMember { name: "RED".to_string(), value: 0i32.to_le_bytes().to_vec() },
-            crate::datatype::EnumMember { name: "GREEN".to_string(), value: 1i32.to_le_bytes().to_vec() },
-            crate::datatype::EnumMember { name: "BLUE".to_string(), value: 2i32.to_le_bytes().to_vec() },
+            crate::datatype::EnumMember {
+                name: "RED".to_string(),
+                value: 0i32.to_le_bytes().to_vec(),
+            },
+            crate::datatype::EnumMember {
+                name: "GREEN".to_string(),
+                value: 1i32.to_le_bytes().to_vec(),
+            },
+            crate::datatype::EnumMember {
+                name: "BLUE".to_string(),
+                value: 2i32.to_le_bytes().to_vec(),
+            },
         ],
     };
     let arr_type = crate::Datatype::Array {
@@ -1018,20 +1039,41 @@ fn compat_compound_complex_members() {
     let dt = crate::Datatype::Compound {
         size: 20,
         members: vec![
-            crate::datatype::CompoundMember { name: "color".to_string(), byte_offset: 0, datatype: enum_type },
-            crate::datatype::CompoundMember { name: "coords".to_string(), byte_offset: 4, datatype: arr_type },
-            crate::datatype::CompoundMember { name: "id".to_string(), byte_offset: 16, datatype: crate::Datatype::native_i32() },
+            crate::datatype::CompoundMember {
+                name: "color".to_string(),
+                byte_offset: 0,
+                datatype: enum_type,
+            },
+            crate::datatype::CompoundMember {
+                name: "coords".to_string(),
+                byte_offset: 4,
+                datatype: arr_type,
+            },
+            crate::datatype::CompoundMember {
+                name: "id".to_string(),
+                byte_offset: 16,
+                datatype: crate::Datatype::native_i32(),
+            },
         ],
     };
     let mut data = Vec::new();
     // Record 0: RED(0), [10,20,30], 100
-    for v in [0i32, 10, 20, 30, 100] { data.extend_from_slice(&v.to_le_bytes()); }
+    for v in [0i32, 10, 20, 30, 100] {
+        data.extend_from_slice(&v.to_le_bytes());
+    }
     // Record 1: GREEN(1), [40,50,60], 200
-    for v in [1i32, 40, 50, 60, 200] { data.extend_from_slice(&v.to_le_bytes()); }
+    for v in [1i32, 40, 50, 60, 200] {
+        data.extend_from_slice(&v.to_le_bytes());
+    }
     // Record 2: BLUE(2), [70,80,90], 300
-    for v in [2i32, 70, 80, 90, 300] { data.extend_from_slice(&v.to_le_bytes()); }
+    for v in [2i32, 70, 80, 90, 300] {
+        data.extend_from_slice(&v.to_le_bytes());
+    }
     w.root_mut().add_dataset("records", dt, &[3], data);
-    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/compound_complex_members.h5");
+    assert_bytes_match(
+        &w.to_bytes().unwrap(),
+        "tests/fixtures/compound_complex_members.h5",
+    );
 }
 
 #[test]
@@ -1070,13 +1112,13 @@ fn compat_empty_chunked() {
 #[test]
 fn compat_fletcher32() {
     let mut w = FileWriter::with_options(compat_opts_v3());
-    let vals: Vec<u8> = (1..=10i32).map(|x| x * 100).flat_map(|x| x.to_le_bytes()).collect();
-    let ds = w.root_mut().add_dataset(
-        "checksummed",
-        crate::Datatype::native_i32(),
-        &[10],
-        vals,
-    );
+    let vals: Vec<u8> = (1..=10i32)
+        .map(|x| x * 100)
+        .flat_map(|x| x.to_le_bytes())
+        .collect();
+    let ds = w
+        .root_mut()
+        .add_dataset("checksummed", crate::Datatype::native_i32(), &[10], vals);
     ds.set_layout(StorageLayout::Chunked {
         chunk_dims: vec![10],
         filters: vec![crate::writer::types::ChunkFilter::Fletcher32],
@@ -1092,12 +1134,9 @@ fn compat_shuffle_deflate() {
         .map(|i| i as f32 * 1.5)
         .flat_map(|x| x.to_le_bytes())
         .collect();
-    let ds = w.root_mut().add_dataset(
-        "shuffled",
-        crate::Datatype::native_f32(),
-        &[20],
-        vals,
-    );
+    let ds = w
+        .root_mut()
+        .add_dataset("shuffled", crate::Datatype::native_f32(), &[20], vals);
     ds.set_layout(StorageLayout::Chunked {
         chunk_dims: vec![20],
         filters: vec![
@@ -1105,7 +1144,10 @@ fn compat_shuffle_deflate() {
             crate::writer::types::ChunkFilter::Deflate(4),
         ],
     });
-    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/shuffle_deflate_v3.h5");
+    assert_bytes_match(
+        &w.to_bytes().unwrap(),
+        "tests/fixtures/shuffle_deflate_v3.h5",
+    );
 }
 
 #[test]
@@ -1115,12 +1157,9 @@ fn compat_implicit_chunks() {
         .iter()
         .flat_map(|x| x.to_le_bytes())
         .collect();
-    let ds = w.root_mut().add_dataset(
-        "implicit",
-        crate::Datatype::native_f64(),
-        &[8],
-        vals,
-    );
+    let ds = w
+        .root_mut()
+        .add_dataset("implicit", crate::Datatype::native_f64(), &[8], vals);
     ds.set_chunked(&[4], vec![]);
     ds.set_early_alloc();
     assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/implicit_chunks.h5");
@@ -1130,12 +1169,9 @@ fn compat_implicit_chunks() {
 fn compat_edge_chunks() {
     let mut w = FileWriter::with_options(compat_opts_v3());
     let vals: Vec<u8> = (0..35i32).flat_map(|x| x.to_le_bytes()).collect();
-    let ds = w.root_mut().add_dataset(
-        "edge",
-        crate::Datatype::native_i32(),
-        &[7, 5],
-        vals,
-    );
+    let ds = w
+        .root_mut()
+        .add_dataset("edge", crate::Datatype::native_i32(), &[7, 5], vals);
     ds.set_chunked(&[4, 3], vec![]);
     assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/edge_chunks.h5");
 }
@@ -1147,12 +1183,9 @@ fn compat_extensible_array() {
         .map(|x| x * 100)
         .flat_map(|x| x.to_le_bytes())
         .collect();
-    let ds = w.root_mut().add_dataset(
-        "extarray",
-        crate::Datatype::native_i32(),
-        &[15],
-        vals,
-    );
+    let ds = w
+        .root_mut()
+        .add_dataset("extarray", crate::Datatype::native_i32(), &[15], vals);
     ds.set_max_dims(&[u64::MAX]);
     ds.set_chunked(&[5], vec![]);
     assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/extensible_array.h5");
@@ -1163,34 +1196,28 @@ fn compat_extensible_array() {
 fn compat_chunked_deflate_v3() {
     let mut w = FileWriter::with_options(compat_opts_v3());
     let vals: Vec<u8> = (0..100i32).flat_map(|x| x.to_le_bytes()).collect();
-    let ds = w.root_mut().add_dataset(
-        "compressed",
-        crate::Datatype::native_i32(),
-        &[10, 10],
-        vals,
+    let ds = w
+        .root_mut()
+        .add_dataset("compressed", crate::Datatype::native_i32(), &[10, 10], vals);
+    ds.set_chunked(&[5, 5], vec![crate::writer::types::ChunkFilter::Deflate(6)]);
+    assert_bytes_match(
+        &w.to_bytes().unwrap(),
+        "tests/fixtures/chunked_deflate_v3.h5",
     );
-    ds.set_chunked(
-        &[5, 5],
-        vec![crate::writer::types::ChunkFilter::Deflate(6)],
-    );
-    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/chunked_deflate_v3.h5");
 }
 
 #[test]
 #[cfg(feature = "system-zlib")]
 fn compat_chunked_btree_v1() {
     let mut w = FileWriter::with_options(compat_opts_v2());
-    let vals: Vec<u8> = (1..=12i32).map(|x| x * 10).flat_map(|x| x.to_le_bytes()).collect();
-    let ds = w.root_mut().add_dataset(
-        "chunked_v3",
-        crate::Datatype::native_i32(),
-        &[12],
-        vals,
-    );
-    ds.set_chunked(
-        &[4],
-        vec![crate::writer::types::ChunkFilter::Deflate(4)],
-    );
+    let vals: Vec<u8> = (1..=12i32)
+        .map(|x| x * 10)
+        .flat_map(|x| x.to_le_bytes())
+        .collect();
+    let ds = w
+        .root_mut()
+        .add_dataset("chunked_v3", crate::Datatype::native_i32(), &[12], vals);
+    ds.set_chunked(&[4], vec![crate::writer::types::ChunkFilter::Deflate(4)]);
     ds.set_layout_version(3);
     assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/chunked_btree_v1.h5");
 }
@@ -1202,12 +1229,9 @@ fn compat_ea_large() {
         .map(|x| x * 10)
         .flat_map(|x| x.to_le_bytes())
         .collect();
-    let ds = w.root_mut().add_dataset(
-        "large_ea",
-        crate::Datatype::native_i32(),
-        &[100],
-        vals,
-    );
+    let ds = w
+        .root_mut()
+        .add_dataset("large_ea", crate::Datatype::native_i32(), &[100], vals);
     ds.set_max_dims(&[u64::MAX]);
     ds.set_chunked(&[4], vec![]);
     assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/ea_large.h5");
@@ -1218,12 +1242,9 @@ fn compat_btree_v2_chunks() {
     let mut w = FileWriter::with_options(compat_opts_v3());
     // 2D 6×4, values 0..23, both dims unlimited → BTreeV2 index
     let vals: Vec<u8> = (0..24i32).flat_map(|x| x.to_le_bytes()).collect();
-    let ds = w.root_mut().add_dataset(
-        "bt2chunked",
-        crate::Datatype::native_i32(),
-        &[6, 4],
-        vals,
-    );
+    let ds = w
+        .root_mut()
+        .add_dataset("bt2chunked", crate::Datatype::native_i32(), &[6, 4], vals);
     ds.set_max_dims(&[u64::MAX, u64::MAX]);
     ds.set_chunked(&[3, 2], vec![]);
     assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/btree_v2_chunks.h5");
@@ -1234,15 +1255,15 @@ fn compat_btree_v2_chunks() {
 fn compat_btree_v2_filtered() {
     let mut w = FileWriter::with_options(compat_opts_v3());
     let vals: Vec<u8> = (0..24i32).flat_map(|x| x.to_le_bytes()).collect();
-    let ds = w.root_mut().add_dataset(
-        "filtered",
-        crate::Datatype::native_i32(),
-        &[6, 4],
-        vals,
-    );
+    let ds = w
+        .root_mut()
+        .add_dataset("filtered", crate::Datatype::native_i32(), &[6, 4], vals);
     ds.set_max_dims(&[u64::MAX, u64::MAX]);
     ds.set_chunked(&[3, 2], vec![crate::writer::types::ChunkFilter::Deflate(6)]);
-    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/btree_v2_filtered.h5");
+    assert_bytes_match(
+        &w.to_bytes().unwrap(),
+        "tests/fixtures/btree_v2_filtered.h5",
+    );
 }
 
 #[test]
@@ -1255,11 +1276,18 @@ fn compat_vlen_sequence() {
         char_set: None,
     };
     let elements: Vec<Vec<u8>> = vec![
-        vec![10i32, 20].iter().flat_map(|x| x.to_le_bytes()).collect(),
-        vec![100i32, 200, 300, 400].iter().flat_map(|x| x.to_le_bytes()).collect(),
+        vec![10i32, 20]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect(),
+        vec![100i32, 200, 300, 400]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect(),
         vec![42i32].iter().flat_map(|x| x.to_le_bytes()).collect(),
     ];
-    w.root_mut().add_vlen_dataset("sequences", dt, &[3], elements);
+    w.root_mut()
+        .add_vlen_dataset("sequences", dt, &[3], elements);
     assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/vlen_sequence.h5");
 }
 
@@ -1268,12 +1296,9 @@ fn compat_btree_v2_deep() {
     let mut w = FileWriter::with_options(compat_opts_v3());
     // 20×10, chunk 1×1, 200 chunks → depth-1 BTree v2
     let vals: Vec<u8> = (0..200i32).flat_map(|x| x.to_le_bytes()).collect();
-    let ds = w.root_mut().add_dataset(
-        "deep",
-        crate::Datatype::native_i32(),
-        &[20, 10],
-        vals,
-    );
+    let ds = w
+        .root_mut()
+        .add_dataset("deep", crate::Datatype::native_i32(), &[20, 10], vals);
     ds.set_max_dims(&[u64::MAX, u64::MAX]);
     ds.set_chunked(&[1, 1], vec![]);
     assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/btree_v2_deep.h5");
@@ -1345,4 +1370,17 @@ fn compat_shared_attr() {
     ds.add_attribute_committed("scale", "shared_i32", dt, &[], scale_val);
 
     assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/shared_attr.h5");
+}
+
+#[test]
+fn compat_dense_attributes() {
+    let mut w = FileWriter::with_options(compat_opts_v3());
+    let grp = w.root_mut().add_group("densegroup");
+    grp.set_attr_phase_change(3, 3);
+    for i in 0..8 {
+        let name = format!("attr_{i:02}");
+        let val = ((i + 1) * 100i32).to_le_bytes().to_vec();
+        grp.add_attribute(&name, crate::Datatype::native_i32(), &[], val);
+    }
+    assert_bytes_match(&w.to_bytes().unwrap(), "tests/fixtures/dense_attributes.h5");
 }
