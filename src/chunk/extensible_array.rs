@@ -318,8 +318,7 @@ fn read_ea_data_block_entries<R: ReadAt + ?Sized>(
 
     let count = dblk_nelmts.min(max_idx_set.saturating_sub(global_start_idx));
     for i in 0..count {
-        let offset = if page_nelmts > 0 {
-            let page_idx = i / page_nelmts;
+        let offset = if let Some(page_idx) = i.checked_div(page_nelmts) {
             let idx_in_page = i % page_nelmts;
             let page_data_bytes = page_nelmts * elmt_size as u64;
             // Each page: elements + 4-byte checksum

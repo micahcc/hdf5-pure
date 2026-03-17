@@ -384,14 +384,11 @@ impl Datatype {
                 }
                 pos
             }
-            11 => {
+            11
                 // Complex: base floating-point type
-                if data.len() > 8 {
+                if data.len() > 8 => {
                     Self::encoded_size(&data[8..])?
-                } else {
-                    0
                 }
-            }
             _ => 0,
         };
 

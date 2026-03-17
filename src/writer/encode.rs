@@ -570,6 +570,7 @@ pub(crate) fn encode_group_info_with_link_phase(max_compact: u16, min_dense: u16
 ///
 /// Creation order adds bits 2+3 to flags and makes message headers 6 bytes
 /// (type(1) + size(2) + flags(1) + creation_order(2)).
+#[allow(dead_code)]
 pub(crate) fn encode_object_header_creation_order(
     messages: &[OhdrMsg],
     opts: &WriteOptions,

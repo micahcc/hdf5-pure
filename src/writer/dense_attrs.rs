@@ -155,8 +155,8 @@ pub(crate) fn encode_dense_attr_structures(
     let heap_id_len: u16 = 8;
 
     let mut heap_ids = Vec::with_capacity(n_attrs);
-    for i in 0..n_attrs {
-        let off = attr_offsets[i] as u64;
+    for (i, &off_val) in attr_offsets.iter().enumerate().take(n_attrs) {
+        let off = off_val as u64;
         let len = storage.attr_bodies[i].len() as u64;
         let mut hid = [0u8; 8];
         hid[0] = 0x00; // version 0, type 0 (managed)
@@ -532,8 +532,8 @@ pub(crate) fn encode_dense_attr_structures_split(
     // Build heap IDs.
     let heap_id_len: u16 = 8;
     let mut heap_ids = Vec::with_capacity(n_attrs);
-    for i in 0..n_attrs {
-        let off = attr_offsets[i] as u64;
+    for (i, &off_val) in attr_offsets.iter().enumerate().take(n_attrs) {
+        let off = off_val as u64;
         let len = storage.attr_bodies[i].len() as u64;
         let mut hid = [0u8; 8];
         hid[0] = 0x00;
@@ -650,6 +650,7 @@ pub(crate) struct DenseLinkSizes {
 
 impl DenseLinkSizes {
     /// Metadata total (FRHP + BTHD×2 + FSHD + BTLF×2 + FSSE). Excludes FHDB.
+    #[allow(dead_code)]
     pub fn meta_total(&self) -> usize {
         self.frhp_size
             + self.bthd_name_size
@@ -729,8 +730,8 @@ pub(crate) fn encode_dense_link_meta(
     // Build heap IDs (7 bytes: byte0=0, then offset(32bit) + length(16bit) packed LE)
     let heap_id_len: u16 = 7;
     let mut heap_ids: Vec<[u8; 7]> = Vec::with_capacity(n);
-    for i in 0..n {
-        let off = link_offsets[i] as u64;
+    for (i, &off_val) in link_offsets.iter().enumerate().take(n) {
+        let off = off_val as u64;
         let len = storage.link_bodies[i].len() as u64;
         let mut hid = [0u8; 7];
         hid[0] = 0x00;
@@ -952,6 +953,7 @@ pub(crate) struct DenseAttrCrtSizes {
 }
 
 impl DenseAttrCrtSizes {
+    #[allow(dead_code)]
     pub fn meta_total(&self) -> usize {
         self.frhp_size
             + self.bthd_name_size
@@ -983,12 +985,12 @@ pub(crate) fn encode_dense_attr_crt_part1(
     frhp_addr: u64,
     fhdb_addr: u64,
     fshd_addr: u64,
-    fsse_addr: u64,
+    _fsse_addr: u64,
 ) -> Result<Vec<u8>> {
     let sizes = compute_dense_attr_crt_sizes(storage);
     let n = storage.attr_bodies.len();
     let bthd_name_addr = frhp_addr + sizes.frhp_size as u64;
-    let bthd_crt_addr = bthd_name_addr + sizes.bthd_name_size as u64;
+    let _bthd_crt_addr = bthd_name_addr + sizes.bthd_name_size as u64;
 
     let max_heap_size_bits: u16 = 40;
     let block_offset_bytes = (max_heap_size_bits as usize).div_ceil(8);
@@ -1006,8 +1008,8 @@ pub(crate) fn encode_dense_attr_crt_part1(
     // Build heap IDs (8 bytes)
     let heap_id_len: u16 = 8;
     let mut heap_ids = Vec::with_capacity(n);
-    for i in 0..n {
-        let off = attr_offsets[i] as u64;
+    for (i, &off_val) in attr_offsets.iter().enumerate().take(n) {
+        let off = off_val as u64;
         let len = storage.attr_bodies[i].len() as u64;
         let mut hid = [0u8; 8];
         hid[0] = 0x00;
@@ -1034,7 +1036,7 @@ pub(crate) fn encode_dense_attr_crt_part1(
     let sect_off_size = limit_enc_size_u64(free_size as u64);
     let fsse_data_size = 1 + sect_off_size + 1 + sect_off_size;
     let fsse_total = 4 + 1 + 8 + fsse_data_size + 4;
-    let fsse_alloc = 27.max(fsse_total);
+    let _fsse_alloc = 27.max(fsse_total);
 
     // BTHD name (type 8)
     let btlf_name_addr = fshd_addr + sizes.fshd_size as u64;
@@ -1085,7 +1087,7 @@ pub(crate) fn encode_dense_attr_crt_part1(
 /// Encode dense attr metadata part 2 (FSHD + BTLF_name + BTLF_crt).
 pub(crate) fn encode_dense_attr_crt_part2(
     storage: &DenseAttrStorage,
-    fshd_addr: u64,
+    _fshd_addr: u64,
     fsse_addr: u64,
 ) -> Result<Vec<u8>> {
     let sizes = compute_dense_attr_crt_sizes(storage);
@@ -1104,10 +1106,10 @@ pub(crate) fn encode_dense_attr_crt_part2(
     let free_offset = offset;
     let free_size = storage.dblk_size - free_offset;
 
-    let heap_id_len: u16 = 8;
+    let _heap_id_len: u16 = 8;
     let mut heap_ids = Vec::with_capacity(n);
-    for i in 0..n {
-        let off = attr_offsets[i] as u64;
+    for (i, &off_val) in attr_offsets.iter().enumerate().take(n) {
+        let off = off_val as u64;
         let len = storage.attr_bodies[i].len() as u64;
         let mut hid = [0u8; 8];
         hid[0] = 0x00;
@@ -1281,6 +1283,7 @@ pub(crate) struct FheapDoublingTable {
     /// The table width (always 4).
     pub width: usize,
     /// Starting block size.
+    #[allow(dead_code)]
     pub start_size: usize,
 }
 
@@ -1423,6 +1426,7 @@ fn compute_doubling_table(
 }
 
 /// Result of encoding the full dense-link indirect-block fractal heap.
+#[allow(dead_code)]
 pub(crate) struct DenseLinksIndirect {
     /// FRHP + BTHD + FSHD bytes (metadata, placed in index_meta region).
     pub meta_bytes: Vec<u8>,
@@ -1446,6 +1450,7 @@ pub(crate) struct DenseLinksIndirect {
 /// `meta_addr`: address where FRHP will be placed.
 /// `data_addr`: address where FHDBs/FHIB data region starts.
 /// `fsse_addr`: address where FSSE will be placed.
+#[allow(dead_code)]
 pub(crate) fn encode_dense_links_indirect(
     link_bodies: &[Vec<u8>],
     name_hashes: &[u32],
@@ -1486,10 +1491,10 @@ pub(crate) fn encode_dense_links_indirect(
     // Compute heap offsets for each link body
     let mut heap_offsets: Vec<usize> = Vec::with_capacity(n);
     let mut body_idx = 0;
-    for bi in 0..n_blocks {
+    for (bi, block) in block_bodies.iter().enumerate().take(n_blocks) {
         let blk_heap_offset = dtable.block_offsets[bi] as usize;
         let mut off_in_block = dblk_header_size;
-        for _body in &block_bodies[bi] {
+        for _body in block {
             heap_offsets.push(blk_heap_offset + off_in_block);
             off_in_block += link_bodies[body_idx].len();
             body_idx += 1;
@@ -1510,11 +1515,10 @@ pub(crate) fn encode_dense_links_indirect(
 
     // Compute free space per block
     let mut block_free: Vec<(usize, usize)> = Vec::new(); // (heap_addr_of_free_start, free_size)
-    for bi in 0..n_blocks {
+    for (bi, block) in block_bodies.iter().enumerate().take(n_blocks) {
         let bsz = dtable.block_sizes[bi];
         let blk_heap_offset = dtable.block_offsets[bi] as usize;
-        let used: usize =
-            dblk_header_size + block_bodies[bi].iter().map(|b| b.len()).sum::<usize>();
+        let used: usize = dblk_header_size + block.iter().map(|b| b.len()).sum::<usize>();
         let free = bsz - used;
         if free > 0 {
             block_free.push((blk_heap_offset + used, free));
@@ -1573,9 +1577,9 @@ pub(crate) fn encode_dense_links_indirect(
     let btree_nodes_addr = fshd_addr_actual + fshd_size as u64;
 
     // Layout of B-tree nodes: if depth=0, just one leaf. If depth=1, leaves first, then internal.
-    let mut btree_total = 0usize;
     let btlf_addrs: Vec<u64>;
     let btin_addr: Option<u64>;
+    let btree_total;
     if btree_depth == 0 {
         btlf_addrs = vec![btree_nodes_addr];
         btin_addr = None;
@@ -1625,7 +1629,7 @@ pub(crate) fn encode_dense_links_indirect(
         let mut btin = btin_raw.clone();
         // Patch child addresses in BTIN
         // Format: sig(4) + ver(1) + type(1) + records(nrec * rec_size) + child_ptrs((nrec+1) * (8+1))
-        let nrec = (n_leaves - 1) as usize;
+        let nrec = n_leaves - 1;
         let recs_start = 6;
         let children_start = recs_start + nrec * rec_size_name as usize;
         for i in 0..=nrec {
@@ -1720,7 +1724,7 @@ pub(crate) fn encode_dense_links_indirect(
 
     // Compute FSSE size
     let mut fsse_data_len = 0usize;
-    for (_, addrs) in &size_groups {
+    for addrs in size_groups.values() {
         fsse_data_len += sect_cnt_size; // count
         fsse_data_len += sect_len_size; // size
         fsse_data_len += addrs.len() * (sect_off_size + 1); // addr + type per section
@@ -1898,13 +1902,14 @@ fn encode_fshd_multi(
     buf
 }
 
+#[allow(dead_code)]
 fn encode_fhib(
     frhp_addr: u64,
     max_heap_size_bits: u16,
     nrows: usize,
     width: usize,
-    start_block_size: usize,
-    block_sizes: &[usize],
+    _start_block_size: usize,
+    _block_sizes: &[usize],
     block_file_addrs: &[u64],
     n_blocks: usize,
 ) -> Vec<u8> {
@@ -1948,10 +1953,11 @@ fn encode_fhib(
 }
 
 /// Encode a B-tree v2 internal node (BTIN) for type 5 (name hash).
+#[allow(dead_code)]
 fn encode_btin_type5(
     leaves: &[Vec<(u32, usize)>],
     heap_ids: &[[u8; 7]],
-    node_size: usize,
+    _node_size: usize,
     _total_records: u64,
 ) -> Vec<u8> {
     let n_leaves = leaves.len();
@@ -1973,8 +1979,8 @@ fn encode_btin_type5(
     // (separator keys = first record of each leaf starting from leaf 1)
     // Actually B-tree v2: internal records are copies of the maximum record from the left subtree.
     // For sorted type-5 records, the separator is the last record of each non-last leaf.
-    for i in 0..nrec {
-        let last_rec = leaves[i].last().unwrap();
+    for leaf in leaves.iter().take(nrec) {
+        let last_rec = leaf.last().unwrap();
         let hash = last_rec.0;
         let idx = last_rec.1;
         buf[off..off + 4].copy_from_slice(&hash.to_le_bytes());
@@ -1985,11 +1991,11 @@ fn encode_btin_type5(
 
     // Child pointers: addr(8) + nrec(1)
     // Will be patched in the caller with actual addresses
-    for i in 0..=nrec {
+    for leaf in leaves.iter().take(nrec + 1) {
         // addr — placeholder, will be patched
         off += 8;
         // nrec in child
-        buf[off] = leaves[i].len() as u8;
+        buf[off] = leaf.len() as u8;
         off += 1;
     }
 

@@ -96,7 +96,7 @@ fn compress_scaleoffset(data: &[u8], cd_values: &[u32; 20]) -> Result<Vec<u8>> {
     };
 
     // Build output: header (21 bytes) + packed bits
-    let mut buf = Vec::with_capacity(21 + (d_nelmts * minbits as usize + 7) / 8);
+    let mut buf = Vec::with_capacity(21 + (d_nelmts * minbits as usize).div_ceil(8));
 
     // minbits (4 bytes LE)
     buf.extend_from_slice(&minbits.to_le_bytes());
@@ -159,7 +159,7 @@ fn so_compress_pack(values: &[u64], minbits: u32, dtype_size: u32, buf: &mut Vec
             let mut src_bits = extracted;
             while remaining > 0 {
                 if remaining <= bits_left {
-                    current_byte |= (src_bits as u8) << (bits_left - remaining);
+                    current_byte |= src_bits << (bits_left - remaining);
                     bits_left -= remaining;
                     remaining = 0;
                 } else {
@@ -278,7 +278,7 @@ fn compress_nbit(data: &[u8], cd_values: &[u32]) -> Result<Vec<u8>> {
             let mut src_bits = extracted;
             while remaining > 0 {
                 if remaining <= bits_left {
-                    current_byte |= (src_bits as u8) << (bits_left - remaining);
+                    current_byte |= src_bits << (bits_left - remaining);
                     bits_left -= remaining;
                     remaining = 0;
                 } else {
